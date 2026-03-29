@@ -1,0 +1,60 @@
+version: 2
+
+project_name: package-checker
+
+builds:
+  - id: package-checker
+    main: .
+    binary: package-checker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+
+archives:
+  - id: binaries
+    ids:
+      - package-checker
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - binary
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+
+nfpms:
+  - id: linux-packages
+    ids:
+      - package-checker
+    package_name: package-checker
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats:
+      - deb
+      - rpm
+      - archlinux
+    description: Scan package manifests for dependencies listed in the JFrog malicious package feed.
+    maintainer: Package Checker Maintainers <opensource@example.invalid>
+    bindir: /usr/local/bin
+    homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY }}
+    license: UNLICENSED
+    contents:
+      - src: ./README.md
+        dst: /usr/share/doc/package-checker/README.md
+        type: doc

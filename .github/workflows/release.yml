@@ -1,0 +1,77 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  macos-pkg:
+    needs: goreleaser
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build darwin arm64 binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          mkdir -p dist/macos
+          go build -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/macos/package-checker .
+
+      - name: Create macOS pkg
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p pkgroot/usr/local/bin
+          cp dist/macos/package-checker pkgroot/usr/local/bin/package-checker
+          chmod 755 pkgroot/usr/local/bin/package-checker
+          pkgbuild \
+            --root pkgroot \
+            --identifier io.github.package-checker \
+            --version "${VERSION#v}" \
+            --install-location / \
+            "dist/package-checker_${VERSION}_darwin_arm64.pkg"
+
+      - name: Upload macOS pkg to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.pkg --clobber
