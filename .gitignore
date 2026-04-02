@@ -1,3 +1,4 @@
 dist/
 package-checker
 coverage.out
+.idea
