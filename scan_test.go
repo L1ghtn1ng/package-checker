@@ -58,3 +58,81 @@ func TestScanDirectoryMatchesSocketPackagesByEcosystemNameAndVersion(t *testing.
 		t.Fatalf("unexpected findings: got %v want %v", got, want)
 	}
 }
+
+func TestScanDirectoryMatchesInstalledNodeModulesPackages(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{}}`), 0o644); err != nil {
+		t.Fatalf("write root package.json: %v", err)
+	}
+
+	nodeModulesFiles := map[string]string{
+		"node_modules/plain/package.json":                     `{"name":"plain","version":"1.2.3"}`,
+		"node_modules/@scope/pkg/package.json":                `{"name":"@scope/pkg","version":"4.5.6"}`,
+		"node_modules/no-name/package.json":                   `{"version":"7.8.9"}`,
+		"node_modules/range-mismatch/package.json":            `{"name":"range-mismatch","version":"2.0.0"}`,
+		"node_modules/plain/node_modules/nested/package.json": `{"name":"nested","version":"9.9.9"}`,
+	}
+	for name, data := range nodeModulesFiles {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create %s parent: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	entries := []feedEntry{
+		{Name: "plain", Version: "1.2.3", Type: "npm"},
+		{Namespace: "scope", Name: "pkg", Version: "4.5.6", Type: "npm"},
+		{Name: "no-name", Version: "7.8.9", Type: "npm"},
+		{Name: "range-mismatch", Version: "1.0.0", Type: "npm"},
+		{Name: "nested", Version: "9.9.9", Type: "npm"},
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, entries)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 5 {
+		t.Fatalf("unexpected scanned files: got %d want 5", scannedFiles)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Dependency.Name+"@"+finding.Dependency.Version)
+	}
+	want := []string{"@scope/pkg@4.5.6", "no-name@7.8.9", "plain@1.2.3"}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestScanDirectoryScansNodeModulesWithoutRootManifest(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "node_modules", "plain", "package.json")
+	if err := os.MkdirAll(filepath.Dir(packageJSONPath), 0o755); err != nil {
+		t.Fatalf("create node_modules package dir: %v", err)
+	}
+	if err := os.WriteFile(packageJSONPath, []byte(`{"name":"plain","version":"1.2.3"}`), 0o644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, []feedEntry{
+		{Name: "plain", Version: "1.2.3", Type: "npm"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 1 {
+		t.Fatalf("unexpected scanned files: got %d want 1", scannedFiles)
+	}
+	if len(findings) != 1 || findings[0].Dependency.Name != "plain" {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}

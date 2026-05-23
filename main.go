@@ -66,7 +66,7 @@ func runWithClient(ctx context.Context, stdout, stderr io.Writer, args []string,
 	}
 
 	if scannedFiles == 0 {
-		fmt.Fprintf(stderr, "error: no supported manifest files found in %s\n", cfg.dir)
+		fmt.Fprintf(stderr, "error: no supported package manifests found in %s\n", cfg.dir)
 		return 2
 	}
 
@@ -74,7 +74,7 @@ func runWithClient(ctx context.Context, stdout, stderr io.Writer, args []string,
 	fmt.Fprintf(stdout, "Cache file: %s\n", cachePath)
 
 	if len(findings) == 0 {
-		fmt.Fprintf(stdout, "No malicious packages detected in %d manifest(s).\n", scannedFiles)
+		fmt.Fprintf(stdout, "No malicious packages detected in %d package manifest(s).\n", scannedFiles)
 		return 0
 	}
 

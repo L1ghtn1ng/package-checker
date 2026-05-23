@@ -53,3 +53,27 @@ func TestFeedEntryUnmarshalPURL(t *testing.T) {
 		t.Fatalf("unexpected purl ecosystem: %s", entry.Ecosystem)
 	}
 }
+
+func TestFeedEntryUnmarshalKeepsVersionFromPURLWhenNameIsPresent(t *testing.T) {
+	t.Parallel()
+
+	var entry feedEntry
+	data := []byte(`{
+		"name": "pkg",
+		"type": "npm",
+		"purl": "pkg:npm/pkg@1.2.3"
+	}`)
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("unmarshal feed entry: %v", err)
+	}
+
+	if entry.Name != "pkg" {
+		t.Fatalf("unexpected name: %s", entry.Name)
+	}
+	if entry.Version != "1.2.3" {
+		t.Fatalf("expected purl version, got %q", entry.Version)
+	}
+	if feedVersionMatches("2.0.0", entry) {
+		t.Fatal("versioned purl entry unexpectedly matched a different dependency version")
+	}
+}

@@ -9,6 +9,8 @@ Supported manifests:
 - Go modules: `go.mod`
 - PHP/Composer: `composer.json`
 
+When a project has `node_modules`, `package-checker` also scans installed npm package roots under `node_modules/<package>` and `node_modules/@scope/<package>`. It does not recursively walk nested dependency trees.
+
 Release builds publish Linux packages (`.deb`, `.rpm`, Arch package artifact), macOS `.pkg` installers for Intel and Apple Silicon, and standalone Windows `.exe` artifacts.
 
 CI also cross-compiles the release targets for Linux, macOS Intel, macOS Apple Silicon, and Windows to catch portability regressions before release tags are cut.

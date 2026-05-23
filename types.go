@@ -58,8 +58,15 @@ func (e *feedEntry) UnmarshalJSON(data []byte) error {
 	if entry.DatePublished == "" {
 		entry.DatePublished = firstString("", fields, "detected_at", "detectedAt", "created_at", "createdAt")
 	}
+	purlName, purlVersion, purlEcosystem := parsePURL(firstString("", fields, "purl", "package_url", "packageURL"))
 	if entry.Name == "" {
-		entry.Name, entry.Version, entry.Ecosystem = parsePURL(firstString("", fields, "purl", "package_url", "packageURL"))
+		entry.Name = purlName
+	}
+	if entry.Version == "" {
+		entry.Version = purlVersion
+	}
+	if entry.Ecosystem == "" {
+		entry.Ecosystem = purlEcosystem
 	}
 
 	*e = entry

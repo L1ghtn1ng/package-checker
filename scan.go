@@ -44,22 +44,16 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 			return nil, 0, err
 		}
 
-		for _, dep := range deps {
-			match, ok := index.match(dep)
-			if !ok {
-				continue
-			}
+		findings = appendMatchingFindings(findings, seen, index, deps)
+	}
 
-			key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name) + "|" + dep.Version
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			findings = append(findings, finding{
-				Dependency: dep,
-				Feed:       match,
-			})
-		}
+	nodeModulesFindings, nodeModulesScanned, err := scanNodeModules(filepath.Join(dir, "node_modules"), index, seen)
+	if err != nil {
+		return nil, 0, err
+	}
+	if nodeModulesScanned > 0 {
+		scannedFiles += nodeModulesScanned
+		findings = append(findings, nodeModulesFindings...)
 	}
 
 	slices.SortFunc(findings, func(a, b finding) int {
@@ -70,6 +64,148 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 	})
 
 	return findings, scannedFiles, nil
+}
+
+func appendMatchingFindings(findings []finding, seen map[string]struct{}, index feedIndex, deps []dependencyRef) []finding {
+	for _, dep := range deps {
+		findings = appendMatchingFinding(findings, seen, index, dep)
+	}
+
+	return findings
+}
+
+func appendMatchingFinding(findings []finding, seen map[string]struct{}, index feedIndex, dep dependencyRef) []finding {
+	match, ok := index.match(dep)
+	if !ok {
+		return findings
+	}
+
+	key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name) + "|" + dep.Version
+	if _, exists := seen[key]; exists {
+		return findings
+	}
+	seen[key] = struct{}{}
+	return append(findings, finding{
+		Dependency: dep,
+		Feed:       match,
+	})
+}
+
+func scanNodeModules(nodeModulesPath string, index feedIndex, seen map[string]struct{}) ([]finding, int, error) {
+	if !index.hasEcosystem(ecosystemNPM) {
+		return nil, 0, nil
+	}
+
+	info, err := os.Stat(nodeModulesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("stat %s: %w", nodeModulesPath, err)
+	}
+	if !info.IsDir() {
+		return nil, 0, nil
+	}
+
+	packageDirs, err := nodeModulesPackageDirs(nodeModulesPath)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	findings := make([]finding, 0)
+	scannedFiles := 0
+	for _, packageDir := range packageDirs {
+		packageJSONPath := filepath.Join(packageDir.path, "package.json")
+		info, err := os.Stat(packageJSONPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, 0, fmt.Errorf("stat %s: %w", packageJSONPath, err)
+		}
+		if info.IsDir() {
+			continue
+		}
+
+		dep, err := parseInstalledPackageJSON(packageJSONPath, packageDir.name)
+		if err != nil {
+			return nil, 0, err
+		}
+		if dep.Name == "" {
+			continue
+		}
+		scannedFiles++
+		findings = appendMatchingFinding(findings, seen, index, dep)
+	}
+
+	return findings, scannedFiles, nil
+}
+
+type nodeModulesPackageDir struct {
+	path string
+	name string
+}
+
+func nodeModulesPackageDirs(nodeModulesPath string) ([]nodeModulesPackageDir, error) {
+	entries, err := os.ReadDir(nodeModulesPath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", nodeModulesPath, err)
+	}
+
+	packageDirs := make([]nodeModulesPackageDir, 0, len(entries))
+	for _, entry := range entries {
+		if !isUsableNodeModulesDir(nodeModulesPath, entry) {
+			continue
+		}
+		name := entry.Name()
+		path := filepath.Join(nodeModulesPath, name)
+		if strings.HasPrefix(name, "@") {
+			scopedDirs, err := scopedNodeModulesPackageDirs(path, name)
+			if err != nil {
+				return nil, err
+			}
+			packageDirs = append(packageDirs, scopedDirs...)
+			continue
+		}
+		packageDirs = append(packageDirs, nodeModulesPackageDir{path: path, name: name})
+	}
+
+	return packageDirs, nil
+}
+
+func scopedNodeModulesPackageDirs(scopePath, scopeName string) ([]nodeModulesPackageDir, error) {
+	entries, err := os.ReadDir(scopePath)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", scopePath, err)
+	}
+
+	packageDirs := make([]nodeModulesPackageDir, 0, len(entries))
+	for _, entry := range entries {
+		if !isUsableNodeModulesDir(scopePath, entry) {
+			continue
+		}
+		name := scopeName + "/" + entry.Name()
+		packageDirs = append(packageDirs, nodeModulesPackageDir{
+			path: filepath.Join(scopePath, entry.Name()),
+			name: name,
+		})
+	}
+	return packageDirs, nil
+}
+
+func isUsableNodeModulesDir(parent string, entry os.DirEntry) bool {
+	name := entry.Name()
+	if name == "" || strings.HasPrefix(name, ".") {
+		return false
+	}
+	if entry.IsDir() {
+		return true
+	}
+	if entry.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(parent, name))
+	return err == nil && info.IsDir()
 }
 
 type feedIndex struct {
@@ -111,6 +247,10 @@ func (f feedIndex) match(dep dependencyRef) (feedEntry, bool) {
 		}
 	}
 	return feedEntry{}, false
+}
+
+func (f feedIndex) hasEcosystem(kind ecosystem) bool {
+	return len(f.entries[kind]) > 0
 }
 
 func mapFeedPlatform(platform string) ecosystem {

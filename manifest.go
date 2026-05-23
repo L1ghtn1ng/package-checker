@@ -21,6 +21,11 @@ type packageJSONManifest struct {
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 }
 
+type installedPackageJSONManifest struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
 type composerManifest struct {
 	Require    map[string]string `json:"require"`
 	RequireDev map[string]string `json:"require-dev"`
@@ -84,6 +89,33 @@ func parsePackageJSON(path string) ([]dependencyRef, error) {
 	})
 
 	return deps, nil
+}
+
+func parseInstalledPackageJSON(path, fallbackName string) (dependencyRef, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return dependencyRef{}, err
+	}
+
+	var manifest installedPackageJSONManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return dependencyRef{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	name := strings.TrimSpace(manifest.Name)
+	if name == "" {
+		name = fallbackName
+	}
+	if name == "" {
+		return dependencyRef{}, nil
+	}
+
+	return dependencyRef{
+		Name:      name,
+		Version:   normalizeVersion(manifest.Version),
+		Source:    path,
+		Ecosystem: ecosystemNPM,
+	}, nil
 }
 
 func parsePyproject(path string) ([]dependencyRef, error) {
@@ -349,6 +381,13 @@ func extractPythonRequirement(requirement string) (string, string) {
 	if comma := strings.Index(version, ","); comma >= 0 {
 		version = version[:comma]
 	}
+	if hash := strings.Index(version, "#"); hash >= 0 {
+		version = version[:hash]
+	}
+	if fields := strings.Fields(version); len(fields) > 0 {
+		version = fields[0]
+	}
+	version = strings.TrimSuffix(version, "\\")
 	return name, normalizeVersion(version)
 }
 

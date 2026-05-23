@@ -90,6 +90,9 @@ Flask==3.0
 -r other.txt
 -e git+https://github.com/example/project.git#egg=Editable_Pkg
 pkgname @ https://example.com/pkg.whl
+commented==1.2.3  # via pip-compile
+continued==2.3.4 \
+hashed==3.4.5 --hash=sha256:abc
 `
 
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -102,9 +105,20 @@ pkgname @ https://example.com/pkg.whl
 	}
 
 	got := dependencyNames(deps)
-	want := []string{"editable_pkg", "flask", "pkgname", "requests"}
+	want := []string{"commented", "continued", "editable_pkg", "flask", "hashed", "pkgname", "requests"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+
+	versions := dependencyVersions(deps)
+	for name, wantVersion := range map[string]string{
+		"commented": "1.2.3",
+		"continued": "2.3.4",
+		"hashed":    "3.4.5",
+	} {
+		if versions[name] != wantVersion {
+			t.Fatalf("unexpected %s version: got %q want %q", name, versions[name], wantVersion)
+		}
 	}
 }
 
@@ -186,4 +200,12 @@ func dependencyNames(deps []dependencyRef) []string {
 		names = append(names, dep.Name)
 	}
 	return names
+}
+
+func dependencyVersions(deps []dependencyRef) map[string]string {
+	versions := make(map[string]string, len(deps))
+	for _, dep := range deps {
+		versions[dep.Name] = dep.Version
+	}
+	return versions
 }
