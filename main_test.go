@@ -22,7 +22,10 @@ func TestRunExitCodeMatch(t *testing.T) {
 
 	client := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return jsonResponse(req, http.StatusOK, `[{"title":"badpkg","platform":"npm","type":"malicious","date_published":"2026-03-29"}]`), nil
+			if strings.HasSuffix(req.URL.Path, "/16/packages") {
+				return jsonResponse(req, http.StatusOK, `[{"name":"badpkg","version":"1.0.0","type":"npm","date_published":"2026-03-29"}]`), nil
+			}
+			return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
 		}),
 	}
 
@@ -55,7 +58,10 @@ func TestRunExitCodeClean(t *testing.T) {
 
 	client := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return jsonResponse(req, http.StatusOK, `[{"title":"badpkg","platform":"pypi","type":"malicious","date_published":"2026-03-29"}]`), nil
+			if strings.HasSuffix(req.URL.Path, "/16/packages") {
+				return jsonResponse(req, http.StatusOK, `[{"name":"badpkg","type":"pypi","date_published":"2026-03-29"}]`), nil
+			}
+			return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
 		}),
 	}
 

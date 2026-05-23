@@ -12,12 +12,18 @@ import (
 )
 
 var pythonRequirementPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+`)
+var goRequirePattern = regexp.MustCompile(`^\s*([^\s]+)\s+(v[^\s]+)`)
 
 type packageJSONManifest struct {
 	Dependencies         map[string]string `json:"dependencies"`
 	DevDependencies      map[string]string `json:"devDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
+}
+
+type composerManifest struct {
+	Require    map[string]string `json:"require"`
+	RequireDev map[string]string `json:"require-dev"`
 }
 
 type pyprojectManifest struct {
@@ -59,13 +65,14 @@ func parsePackageJSON(path string) ([]dependencyRef, error) {
 		manifest.OptionalDependencies,
 		manifest.PeerDependencies,
 	} {
-		for name := range group {
+		for name, spec := range group {
 			if _, ok := seen[name]; ok {
 				continue
 			}
 			seen[name] = struct{}{}
 			deps = append(deps, dependencyRef{
 				Name:      name,
+				Version:   extractExactVersion(spec),
 				Source:    path,
 				Ecosystem: ecosystemNPM,
 			})
@@ -92,7 +99,8 @@ func parsePyproject(path string) ([]dependencyRef, error) {
 
 	seen := map[string]struct{}{}
 	deps := make([]dependencyRef, 0)
-	add := func(name string) {
+	add := func(value string) {
+		name, version := splitNameVersion(value)
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
@@ -103,18 +111,19 @@ func parsePyproject(path string) ([]dependencyRef, error) {
 		seen[name] = struct{}{}
 		deps = append(deps, dependencyRef{
 			Name:      name,
+			Version:   version,
 			Source:    path,
 			Ecosystem: ecosystemPython,
 		})
 	}
 
 	for _, requirement := range manifest.Project.Dependencies {
-		add(extractPythonRequirementName(requirement))
+		addPythonRequirement(add, requirement)
 	}
 
 	for _, requirements := range manifest.Project.OptionalDependencies {
 		for _, requirement := range requirements {
-			add(extractPythonRequirementName(requirement))
+			addPythonRequirement(add, requirement)
 		}
 	}
 
@@ -142,7 +151,8 @@ func parseRequirements(path string) ([]dependencyRef, error) {
 	seen := map[string]struct{}{}
 	deps := make([]dependencyRef, 0)
 
-	add := func(name string) {
+	add := func(value string) {
+		name, version := splitNameVersion(value)
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
@@ -153,6 +163,7 @@ func parseRequirements(path string) ([]dependencyRef, error) {
 		seen[name] = struct{}{}
 		deps = append(deps, dependencyRef{
 			Name:      name,
+			Version:   version,
 			Source:    path,
 			Ecosystem: ecosystemPython,
 		})
@@ -173,7 +184,98 @@ func parseRequirements(path string) ([]dependencyRef, error) {
 			continue
 		}
 
-		add(extractPythonRequirementName(line))
+		addPythonRequirement(add, line)
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	return deps, nil
+}
+
+func parseGoMod(path string) ([]dependencyRef, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	inRequireBlock := false
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := stripInlineComment(rawLine)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "require (") {
+			inRequireBlock = true
+			continue
+		}
+		if inRequireBlock && trimmed == ")" {
+			inRequireBlock = false
+			continue
+		}
+		if strings.HasPrefix(trimmed, "require ") {
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "require "))
+		} else if !inRequireBlock {
+			continue
+		}
+
+		match := goRequirePattern.FindStringSubmatch(trimmed)
+		if len(match) != 3 {
+			continue
+		}
+		name := match[1]
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		deps = append(deps, dependencyRef{
+			Name:      name,
+			Version:   strings.TrimPrefix(match[2], "v"),
+			Source:    path,
+			Ecosystem: ecosystemGo,
+		})
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	return deps, nil
+}
+
+func parseComposerJSON(path string) ([]dependencyRef, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest composerManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	for _, group := range []map[string]string{manifest.Require, manifest.RequireDev} {
+		for name, spec := range group {
+			if strings.EqualFold(name, "php") || strings.HasPrefix(strings.ToLower(name), "ext-") {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			deps = append(deps, dependencyRef{
+				Name:      name,
+				Version:   extractExactVersion(spec),
+				Source:    path,
+				Ecosystem: ecosystemPHP,
+			})
+		}
 	}
 
 	slices.SortFunc(deps, func(a, b dependencyRef) int {
@@ -216,11 +318,101 @@ func extractPythonRequirementName(requirement string) string {
 	return strings.ToLower(match)
 }
 
+func addPythonRequirement(add func(string), requirement string) {
+	name, version := extractPythonRequirement(requirement)
+	if name == "" {
+		return
+	}
+	if version != "" {
+		add(name + "@" + version)
+		return
+	}
+	add(name)
+}
+
+func extractPythonRequirement(requirement string) (string, string) {
+	name := extractPythonRequirementName(requirement)
+	if name == "" {
+		return "", ""
+	}
+
+	candidate := strings.TrimSpace(requirement)
+	if idx := strings.Index(candidate, ";"); idx >= 0 {
+		candidate = candidate[:idx]
+	}
+	exactToken := "=="
+	idx := strings.Index(candidate, exactToken)
+	if idx < 0 {
+		return name, ""
+	}
+	version := strings.TrimSpace(candidate[idx+len(exactToken):])
+	if comma := strings.Index(version, ","); comma >= 0 {
+		version = version[:comma]
+	}
+	return name, normalizeVersion(version)
+}
+
+func splitNameVersion(value string) (string, string) {
+	name, version, ok := strings.Cut(value, "@")
+	if !ok {
+		return value, ""
+	}
+	return name, version
+}
+
 func addPoetryDependencies(add func(string), deps map[string]any) {
-	for name := range deps {
+	for name, spec := range deps {
 		if strings.EqualFold(name, "python") {
+			continue
+		}
+		if version := poetryExactVersion(spec); version != "" {
+			add(name + "@" + version)
 			continue
 		}
 		add(name)
 	}
+}
+
+func poetryExactVersion(spec any) string {
+	switch value := spec.(type) {
+	case string:
+		return extractExactVersion(value)
+	case map[string]any:
+		if version, ok := value["version"].(string); ok {
+			return extractExactVersion(version)
+		}
+	default:
+		return ""
+	}
+	return ""
+}
+
+func stripInlineComment(line string) string {
+	if idx := strings.Index(line, "//"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func extractExactVersion(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return ""
+	}
+	spec = strings.TrimPrefix(spec, "npm:")
+	spec = strings.TrimPrefix(spec, "=")
+	spec = strings.TrimSpace(spec)
+	if strings.ContainsAny(spec, "<>^~*|, ") {
+		return ""
+	}
+	return normalizeVersion(spec)
+}
+
+func normalizeVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if idx := strings.Index(version, "?"); idx >= 0 {
+		version = version[:idx]
+	}
+	version = strings.Trim(version, `"'`)
+	return strings.TrimPrefix(version, "v")
 }

@@ -22,7 +22,10 @@ func TestLoadFeedUsesFreshCache(t *testing.T) {
 		Timeout: 5 * time.Second,
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			hits.Add(1)
-			return jsonResponse(req, http.StatusOK, `[{"title":"badpkg","platform":"npm","type":"malicious","date_published":"2026-03-29"}]`), nil
+			if strings.HasSuffix(req.URL.Path, "/16/packages") {
+				return jsonResponse(req, http.StatusOK, `{"packages":[{"name":"badpkg","version":"1.0.0","type":"npm","date_published":"2026-03-29"}]}`), nil
+			}
+			return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
 		}),
 	}
 	now := time.Date(2026, 3, 29, 12, 0, 0, 0, time.UTC)
@@ -42,8 +45,64 @@ func TestLoadFeedUsesFreshCache(t *testing.T) {
 	if len(entries) != 1 || source != "cache" {
 		t.Fatalf("unexpected second result: entries=%d source=%s", len(entries), source)
 	}
-	if hits.Load() != 1 {
-		t.Fatalf("expected one upstream hit, got %d", hits.Load())
+	if hits.Load() != 10 {
+		t.Fatalf("expected ten upstream hits, got %d", hits.Load())
+	}
+}
+
+func TestFetchSocketFeedSkipsSparse404sUntilMinimumStopID(t *testing.T) {
+	t.Parallel()
+
+	seenPaths := make([]string, 0)
+	seenUserAgents := make([]string, 0)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			seenPaths = append(seenPaths, req.URL.Path)
+			seenUserAgents = append(seenUserAgents, req.Header.Get("User-Agent"))
+			if req.Header.Get("Accept") != "application/json" {
+				t.Fatalf("unexpected accept header: %q", req.Header.Get("Accept"))
+			}
+			switch req.URL.Path {
+			case "/attacks/16/packages":
+				return jsonResponse(req, http.StatusOK, `[{"namespace":"scope","name":"pkg","version":"1.2.3","type":"npm"}]`), nil
+			case "/attacks/21/packages":
+				return jsonResponse(req, http.StatusOK, `{"data":[{"name":"requests","version":"2.31.0","type":"pypi"}]}`), nil
+			case "/attacks/25/packages":
+				return jsonResponse(req, http.StatusOK, `{"packages":[{"namespace":"laravel-lang","name":"lang","version":"1.0.2","type":"composer"}]}`), nil
+			default:
+				return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
+			}
+		}),
+	}
+
+	entries, err := fetchSocketFeed(context.Background(), client, "https://example.test/attacks/%d/packages", 16)
+	if err != nil {
+		t.Fatalf("fetch feed: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+	wantPaths := []string{
+		"/attacks/16/packages",
+		"/attacks/17/packages",
+		"/attacks/18/packages",
+		"/attacks/19/packages",
+		"/attacks/20/packages",
+		"/attacks/21/packages",
+		"/attacks/22/packages",
+		"/attacks/23/packages",
+		"/attacks/24/packages",
+		"/attacks/25/packages",
+		"/attacks/26/packages",
+	}
+	if strings.Join(seenPaths, ",") != strings.Join(wantPaths, ",") {
+		t.Fatalf("unexpected request paths: got %v want %v", seenPaths, wantPaths)
+	}
+	for _, userAgent := range seenUserAgents {
+		if userAgent != socketUserAgent {
+			t.Fatalf("unexpected user agent: %q", userAgent)
+		}
 	}
 }
 
@@ -166,7 +225,10 @@ func TestLoadFeedUsesFreshEntriesWhenCacheWriteFails(t *testing.T) {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			return jsonResponse(req, http.StatusOK, `[{"title":"remote-bad","platform":"npm","type":"malicious","date_published":"2026-03-29"}]`), nil
+			if strings.HasSuffix(req.URL.Path, "/16/packages") {
+				return jsonResponse(req, http.StatusOK, `[{"name":"remote-bad","type":"npm","date_published":"2026-03-29"}]`), nil
+			}
+			return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
 		}),
 	}
 
@@ -177,7 +239,7 @@ func TestLoadFeedUsesFreshEntriesWhenCacheWriteFails(t *testing.T) {
 	if source != "remote" {
 		t.Fatalf("unexpected source: %s", source)
 	}
-	if len(entries) != 1 || entries[0].Title != "remote-bad" {
+	if len(entries) != 1 || entries[0].Name != "remote-bad" {
 		t.Fatalf("unexpected entries: %+v", entries)
 	}
 }

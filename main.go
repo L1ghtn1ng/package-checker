@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const defaultFeedURL = "https://raw.githubusercontent.com/jfrog/research/refs/heads/main/src/malicious/malicious-data.json"
+const defaultFeedURL = "https://socket.dev/api/public/supply-chain-attacks/%d/packages"
 
 type config struct {
 	dir       string
@@ -82,10 +82,11 @@ func runWithClient(ctx context.Context, stdout, stderr io.Writer, args []string,
 	for _, finding := range findings {
 		fmt.Fprintf(
 			stdout,
-			"- %s in %s [%s, %s, published %s]\n",
+			"- %s%s in %s [%s, %s, published %s]\n",
 			finding.Dependency.Name,
+			formatDependencyVersion(finding.Dependency.Version),
 			finding.Dependency.Source,
-			finding.Feed.Platform,
+			feedEcosystem(finding.Feed),
 			finding.Feed.Type,
 			finding.Feed.DatePublished,
 		)
@@ -125,14 +126,21 @@ func parseFlags(stderr io.Writer, args []string) (config, error) {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "Usage: %s [flags]\n\n", binaryName)
-	fmt.Fprintln(w, "Scans package manifests in a directory against the JFrog malicious package feed.")
+	fmt.Fprintln(w, "Scans package manifests in a directory against the Socket supply-chain attack package feed.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --dir string         Directory containing package manifests to scan (default \".\")")
 	fmt.Fprintln(w, "  --cache-file string  Path to the cached malicious package feed")
-	fmt.Fprintf(w, "  --feed-url string    Feed URL to fetch (default %q)\n", defaultFeedURL)
+	fmt.Fprintf(w, "  --feed-url string    Socket feed URL pattern to fetch; use %%d for the campaign number (default %q)\n", defaultFeedURL)
 	fmt.Fprintln(w, "  --version            Show version information")
 	fmt.Fprintln(w, "  --help               Show help")
+}
+
+func formatDependencyVersion(version string) string {
+	if version == "" {
+		return ""
+	}
+	return "@" + version
 }
 
 func resolveCachePath(cacheFile string) (string, error) {

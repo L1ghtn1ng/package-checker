@@ -44,18 +44,33 @@ jobs:
           - goos: linux
             goarch: amd64
             output: package-checker-linux-amd64
+            build_flags: -buildmode=pie
+            ldflags: -bindnow
           - goos: linux
             goarch: arm64
             output: package-checker-linux-arm64
+            build_flags: -buildmode=pie
+            ldflags: -bindnow
+          - goos: darwin
+            goarch: amd64
+            output: package-checker-darwin-amd64
+            build_flags: ""
+            ldflags: ""
           - goos: darwin
             goarch: arm64
             output: package-checker-darwin-arm64
+            build_flags: ""
+            ldflags: ""
           - goos: windows
             goarch: amd64
             output: package-checker-windows-amd64.exe
+            build_flags: ""
+            ldflags: ""
           - goos: windows
             goarch: arm64
             output: package-checker-windows-arm64.exe
+            build_flags: ""
+            ldflags: ""
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
@@ -75,4 +90,4 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -o "${{ runner.temp }}/${{ matrix.output }}" .
+        run: go build ${{ matrix.build_flags }} -ldflags "${{ matrix.ldflags }}" -o "${{ runner.temp }}/${{ matrix.output }}" .

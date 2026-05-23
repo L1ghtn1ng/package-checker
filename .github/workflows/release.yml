@@ -42,6 +42,12 @@ jobs:
   macos-pkg:
     needs: goreleaser
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch:
+          - amd64
+          - arm64
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
@@ -58,28 +64,29 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build darwin arm64 binary
+      - name: Build darwin ${{ matrix.goarch }} binary
         env:
           CGO_ENABLED: "0"
           GOOS: darwin
-          GOARCH: arm64
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist/macos
-          go build -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dist/macos/package-checker .
+          mkdir -p "dist/macos-${GOARCH}"
+          go build -ldflags "-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o "dist/macos-${GOARCH}/package-checker" .
 
       - name: Create macOS pkg
         env:
           VERSION: ${{ github.ref_name }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p pkgroot/usr/local/bin
-          cp dist/macos/package-checker pkgroot/usr/local/bin/package-checker
-          chmod 755 pkgroot/usr/local/bin/package-checker
+          mkdir -p "pkgroot-${GOARCH}/usr/local/bin"
+          cp "dist/macos-${GOARCH}/package-checker" "pkgroot-${GOARCH}/usr/local/bin/package-checker"
+          chmod 755 "pkgroot-${GOARCH}/usr/local/bin/package-checker"
           pkgbuild \
-            --root pkgroot \
+            --root "pkgroot-${GOARCH}" \
             --identifier io.github.package-checker \
             --version "${VERSION#v}" \
             --install-location / \
-            "dist/package-checker_${VERSION}_darwin_arm64.pkg"
+            "dist/package-checker_${VERSION}_darwin_${GOARCH}.pkg"
 
       - name: Upload macOS pkg to release
         env:

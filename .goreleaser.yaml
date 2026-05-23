@@ -3,28 +3,39 @@ version: 2
 project_name: package-checker
 
 builds:
-  - id: package-checker
+  - id: package-checker-linux
+    main: .
+    binary: package-checker
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -buildmode=pie
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -bindnow -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+  - id: package-checker-non-linux
     main: .
     binary: package-checker
     env:
       - CGO_ENABLED=0
     goos:
-      - linux
       - darwin
       - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: darwin
-        goarch: amd64
     ldflags:
       - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
 
 archives:
   - id: binaries
     ids:
-      - package-checker
+      - package-checker-linux
+      - package-checker-non-linux
     formats:
       - tar.gz
     format_overrides:
@@ -42,14 +53,14 @@ changelog:
 nfpms:
   - id: linux-packages
     ids:
-      - package-checker
+      - package-checker-linux
     package_name: package-checker
     file_name_template: "{{ .ConventionalFileName }}"
     formats:
       - deb
       - rpm
       - archlinux
-    description: Scan package manifests for dependencies listed in the JFrog malicious package feed.
+    description: Scan package manifests for dependencies listed in Socket supply-chain attack campaigns.
     maintainer: Package Checker Maintainers <opensource@example.invalid>
     bindir: /usr/local/bin
     homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY }}

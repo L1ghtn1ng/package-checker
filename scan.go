@@ -16,6 +16,8 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 		{filename: "package.json", parser: parsePackageJSON},
 		{filename: "pyproject.toml", parser: parsePyproject},
 		{filename: "requirements.txt", parser: parseRequirements},
+		{filename: "go.mod", parser: parseGoMod},
+		{filename: "composer.json", parser: parseComposerJSON},
 	}
 
 	index := buildFeedIndex(entries)
@@ -48,7 +50,7 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 				continue
 			}
 
-			key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name)
+			key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name) + "|" + dep.Version
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -71,29 +73,27 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 }
 
 type feedIndex struct {
-	npm    map[string]feedEntry
-	python map[string]feedEntry
+	entries map[ecosystem]map[string][]feedEntry
 }
 
 func buildFeedIndex(entries []feedEntry) feedIndex {
 	index := feedIndex{
-		npm:    make(map[string]feedEntry),
-		python: make(map[string]feedEntry),
+		entries: make(map[ecosystem]map[string][]feedEntry),
 	}
 
 	for _, entry := range entries {
-		switch mapFeedPlatform(entry.Platform) {
-		case ecosystemNPM:
-			key := normalizeDependencyName(ecosystemNPM, entry.Title)
-			if key != "" {
-				index.npm[key] = entry
-			}
-		case ecosystemPython:
-			key := normalizeDependencyName(ecosystemPython, entry.Title)
-			if key != "" {
-				index.python[key] = entry
-			}
+		kind := feedEcosystem(entry)
+		if kind == "" {
+			continue
 		}
+		key := normalizeDependencyName(kind, feedPackageName(entry, kind))
+		if key == "" {
+			continue
+		}
+		if index.entries[kind] == nil {
+			index.entries[kind] = make(map[string][]feedEntry)
+		}
+		index.entries[kind][key] = append(index.entries[kind][key], entry)
 	}
 
 	return index
@@ -101,16 +101,16 @@ func buildFeedIndex(entries []feedEntry) feedIndex {
 
 func (f feedIndex) match(dep dependencyRef) (feedEntry, bool) {
 	key := normalizeDependencyName(dep.Ecosystem, dep.Name)
-	switch dep.Ecosystem {
-	case ecosystemNPM:
-		entry, ok := f.npm[key]
-		return entry, ok
-	case ecosystemPython:
-		entry, ok := f.python[key]
-		return entry, ok
-	default:
+	candidates := f.entries[dep.Ecosystem][key]
+	if len(candidates) == 0 {
 		return feedEntry{}, false
 	}
+	for _, entry := range candidates {
+		if feedVersionMatches(dep.Version, entry) {
+			return entry, true
+		}
+	}
+	return feedEntry{}, false
 }
 
 func mapFeedPlatform(platform string) ecosystem {
@@ -119,15 +119,70 @@ func mapFeedPlatform(platform string) ecosystem {
 		return ecosystemNPM
 	case "pypi", "pip", "python":
 		return ecosystemPython
+	case "go", "golang", "gomod", "go-mod", "go modules", "go_modules":
+		return ecosystemGo
+	case "php", "composer", "packagist":
+		return ecosystemPHP
 	default:
 		return ""
 	}
 }
 
+func feedEcosystem(entry feedEntry) ecosystem {
+	for _, value := range []string{string(entry.Ecosystem), entry.Platform, entry.Type} {
+		if kind := mapFeedPlatform(value); kind != "" {
+			return kind
+		}
+	}
+	return ""
+}
+
+func feedPackageName(entry feedEntry, kind ecosystem) string {
+	name := strings.TrimSpace(entry.Name)
+	if name == "" {
+		name = strings.TrimSpace(entry.Title)
+	}
+	namespace := strings.TrimSpace(entry.Namespace)
+	if namespace == "" || name == "" {
+		return name
+	}
+	switch kind {
+	case ecosystemNPM:
+		namespace = strings.TrimPrefix(namespace, "@")
+		if strings.HasPrefix(name, "@") || strings.Contains(name, "/") {
+			return name
+		}
+		return "@" + namespace + "/" + name
+	case ecosystemGo, ecosystemPHP:
+		if strings.Contains(name, "/") {
+			return name
+		}
+		return strings.TrimRight(namespace, "/") + "/" + name
+	default:
+		return name
+	}
+}
+
+func feedVersionMatches(dependencyVersion string, entry feedEntry) bool {
+	feedVersion := normalizeVersion(entry.Version)
+	if feedVersion == "" {
+		if len(entry.Versions) == 0 {
+			return true
+		}
+		for _, version := range entry.Versions {
+			if normalizeVersion(dependencyVersion) == normalizeVersion(version) {
+				return true
+			}
+		}
+		return false
+	}
+	return normalizeVersion(dependencyVersion) == feedVersion
+}
+
 func normalizeDependencyName(kind ecosystem, name string) string {
 	name = strings.TrimSpace(name)
 	switch kind {
-	case ecosystemNPM:
+	case ecosystemNPM, ecosystemGo, ecosystemPHP:
 		return strings.ToLower(name)
 	case ecosystemPython:
 		name = strings.ToLower(name)

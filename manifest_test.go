@@ -33,6 +33,9 @@ func TestParsePackageJSON(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
 	}
+	if deps[0].Version != "1.0.0" {
+		t.Fatalf("expected exact package.json version, got %q", deps[0].Version)
+	}
 }
 
 func TestParsePyproject(t *testing.T) {
@@ -102,6 +105,78 @@ pkgname @ https://example.com/pkg.whl
 	want := []string{"editable_pkg", "flask", "pkgname", "requests"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func TestParseGoMod(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go.mod")
+	data := `
+module example.test/app
+
+go 1.26
+
+require github.com/example/direct v1.2.3
+
+require (
+	golang.org/x/mod v0.25.0
+	github.com/example/indirect v0.1.0 // indirect
+)
+`
+
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	deps, err := parseGoMod(path)
+	if err != nil {
+		t.Fatalf("parse go.mod: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"github.com/example/direct", "github.com/example/indirect", "golang.org/x/mod"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+	if deps[0].Version != "1.2.3" {
+		t.Fatalf("unexpected Go version: %q", deps[0].Version)
+	}
+}
+
+func TestParseComposerJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "composer.json")
+	data := `{
+		"require": {
+			"php": "^8.3",
+			"ext-json": "*",
+			"vendor/package": "1.2.3"
+		},
+		"require-dev": {
+			"phpunit/phpunit": "^11.0"
+		}
+	}`
+
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write composer.json: %v", err)
+	}
+
+	deps, err := parseComposerJSON(path)
+	if err != nil {
+		t.Fatalf("parse composer.json: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"phpunit/phpunit", "vendor/package"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+	if deps[1].Version != "1.2.3" {
+		t.Fatalf("unexpected Composer exact version: %q", deps[1].Version)
 	}
 }
 
