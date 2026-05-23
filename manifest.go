@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -26,9 +27,34 @@ type installedPackageJSONManifest struct {
 	Version string `json:"version"`
 }
 
+type packageLockManifest struct {
+	Packages     map[string]packageLockPackage    `json:"packages"`
+	Dependencies map[string]packageLockDependency `json:"dependencies"`
+}
+
+type packageLockPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+type packageLockDependency struct {
+	Version      string                           `json:"version"`
+	Dependencies map[string]packageLockDependency `json:"dependencies"`
+}
+
 type composerManifest struct {
 	Require    map[string]string `json:"require"`
 	RequireDev map[string]string `json:"require-dev"`
+}
+
+type composerLockManifest struct {
+	Packages    []composerLockPackage `json:"packages"`
+	PackagesDev []composerLockPackage `json:"packages-dev"`
+}
+
+type composerLockPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 type pyprojectManifest struct {
@@ -76,10 +102,11 @@ func parsePackageJSON(path string) ([]dependencyRef, error) {
 			}
 			seen[name] = struct{}{}
 			deps = append(deps, dependencyRef{
-				Name:      name,
-				Version:   extractExactVersion(spec),
-				Source:    path,
-				Ecosystem: ecosystemNPM,
+				Name:        name,
+				Version:     extractExactVersion(spec),
+				VersionSpec: strings.TrimSpace(spec),
+				Source:      path,
+				Ecosystem:   ecosystemNPM,
 			})
 		}
 	}
@@ -116,6 +143,62 @@ func parseInstalledPackageJSON(path, fallbackName string) (dependencyRef, error)
 		Source:    path,
 		Ecosystem: ecosystemNPM,
 	}, nil
+}
+
+func parsePackageLock(path string) ([]dependencyRef, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest packageLockManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	add := func(name, version string) {
+		name = strings.TrimSpace(name)
+		version = normalizeVersion(version)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name) + "@" + version
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		deps = append(deps, dependencyRef{
+			Name:      name,
+			Version:   version,
+			Source:    path,
+			Ecosystem: ecosystemNPM,
+		})
+	}
+
+	for packagePath, pkg := range manifest.Packages {
+		if packagePath == "" {
+			continue
+		}
+		name := strings.TrimSpace(pkg.Name)
+		if name == "" {
+			name = packageLockPackageName(packagePath)
+		}
+		add(name, pkg.Version)
+	}
+	for name, dep := range manifest.Dependencies {
+		addPackageLockDependency(add, name, dep)
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+
+	return deps, nil
 }
 
 func parsePyproject(path string) ([]dependencyRef, error) {
@@ -302,10 +385,11 @@ func parseComposerJSON(path string) ([]dependencyRef, error) {
 			}
 			seen[name] = struct{}{}
 			deps = append(deps, dependencyRef{
-				Name:      name,
-				Version:   extractExactVersion(spec),
-				Source:    path,
-				Ecosystem: ecosystemPHP,
+				Name:        name,
+				Version:     extractExactVersion(spec),
+				VersionSpec: strings.TrimSpace(spec),
+				Source:      path,
+				Ecosystem:   ecosystemPHP,
 			})
 		}
 	}
@@ -315,6 +399,71 @@ func parseComposerJSON(path string) ([]dependencyRef, error) {
 	})
 
 	return deps, nil
+}
+
+func parseComposerLock(path string) ([]dependencyRef, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest composerLockManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	for _, group := range [][]composerLockPackage{manifest.Packages, manifest.PackagesDev} {
+		for _, pkg := range group {
+			name := strings.TrimSpace(pkg.Name)
+			if name == "" || strings.EqualFold(name, "php") || strings.HasPrefix(strings.ToLower(name), "ext-") {
+				continue
+			}
+			version := normalizeVersion(pkg.Version)
+			key := strings.ToLower(name) + "@" + version
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			deps = append(deps, dependencyRef{
+				Name:      name,
+				Version:   version,
+				Source:    path,
+				Ecosystem: ecosystemPHP,
+			})
+		}
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+
+	return deps, nil
+}
+
+func packageLockPackageName(packagePath string) string {
+	parts := strings.Split(filepath.ToSlash(packagePath), "/")
+	for i, part := range parts {
+		if part != "node_modules" || i+1 >= len(parts) {
+			continue
+		}
+		if strings.HasPrefix(parts[i+1], "@") && i+2 < len(parts) {
+			return parts[i+1] + "/" + parts[i+2]
+		}
+		return parts[i+1]
+	}
+	return ""
+}
+
+func addPackageLockDependency(add func(string, string), name string, dep packageLockDependency) {
+	add(name, dep.Version)
+	for childName, child := range dep.Dependencies {
+		addPackageLockDependency(add, childName, child)
+	}
 }
 
 func extractEditableRequirementName(line string) string {

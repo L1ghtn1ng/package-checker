@@ -73,7 +73,7 @@ func TestFeedEntryUnmarshalKeepsVersionFromPURLWhenNameIsPresent(t *testing.T) {
 	if entry.Version != "1.2.3" {
 		t.Fatalf("expected purl version, got %q", entry.Version)
 	}
-	if feedVersionMatches("2.0.0", entry) {
+	if feedVersionMatches(dependencyRef{Name: "pkg", Version: "2.0.0", Ecosystem: ecosystemNPM}, entry) {
 		t.Fatal("versioned purl entry unexpectedly matched a different dependency version")
 	}
 }

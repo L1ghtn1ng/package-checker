@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -14,10 +15,12 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 		parser   func(string) ([]dependencyRef, error)
 	}{
 		{filename: "package.json", parser: parsePackageJSON},
+		{filename: "package-lock.json", parser: parsePackageLock},
 		{filename: "pyproject.toml", parser: parsePyproject},
 		{filename: "requirements.txt", parser: parseRequirements},
 		{filename: "go.mod", parser: parseGoMod},
 		{filename: "composer.json", parser: parseComposerJSON},
+		{filename: "composer.lock", parser: parseComposerLock},
 	}
 
 	index := buildFeedIndex(entries)
@@ -80,7 +83,7 @@ func appendMatchingFinding(findings []finding, seen map[string]struct{}, index f
 		return findings
 	}
 
-	key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name) + "|" + dep.Version
+	key := string(dep.Ecosystem) + "|" + dep.Source + "|" + normalizeDependencyName(dep.Ecosystem, dep.Name) + "|" + dep.Version + "|" + dep.VersionSpec
 	if _, exists := seen[key]; exists {
 		return findings
 	}
@@ -242,7 +245,7 @@ func (f feedIndex) match(dep dependencyRef) (feedEntry, bool) {
 		return feedEntry{}, false
 	}
 	for _, entry := range candidates {
-		if feedVersionMatches(dep.Version, entry) {
+		if feedVersionMatches(dep, entry) {
 			return entry, true
 		}
 	}
@@ -303,20 +306,194 @@ func feedPackageName(entry feedEntry, kind ecosystem) string {
 	}
 }
 
-func feedVersionMatches(dependencyVersion string, entry feedEntry) bool {
+func feedVersionMatches(dep dependencyRef, entry feedEntry) bool {
 	feedVersion := normalizeVersion(entry.Version)
 	if feedVersion == "" {
 		if len(entry.Versions) == 0 {
 			return true
 		}
 		for _, version := range entry.Versions {
-			if normalizeVersion(dependencyVersion) == normalizeVersion(version) {
+			if dependencyVersionMatches(dep, normalizeVersion(version)) {
 				return true
 			}
 		}
 		return false
 	}
-	return normalizeVersion(dependencyVersion) == feedVersion
+	return dependencyVersionMatches(dep, feedVersion)
+}
+
+func dependencyVersionMatches(dep dependencyRef, feedVersion string) bool {
+	if normalizeVersion(dep.Version) == feedVersion {
+		return true
+	}
+	if dep.VersionSpec == "" {
+		return false
+	}
+	switch dep.Ecosystem {
+	case ecosystemPHP:
+		return composerConstraintAllowsVersion(dep.VersionSpec, feedVersion)
+	default:
+		return false
+	}
+}
+
+func composerConstraintAllowsVersion(spec, version string) bool {
+	for _, alternative := range strings.FieldsFunc(spec, func(r rune) bool {
+		return r == '|'
+	}) {
+		alternative = strings.TrimSpace(alternative)
+		if alternative == "" {
+			continue
+		}
+		if composerAlternativeAllowsVersion(alternative, version) {
+			return true
+		}
+	}
+	return false
+}
+
+func composerAlternativeAllowsVersion(spec, version string) bool {
+	for _, part := range strings.FieldsFunc(spec, func(r rune) bool {
+		return r == ',' || r == ' '
+	}) {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "*" {
+			continue
+		}
+		if !composerConstraintPartAllowsVersion(part, version) {
+			return false
+		}
+	}
+	return true
+}
+
+func composerConstraintPartAllowsVersion(part, version string) bool {
+	switch {
+	case strings.HasPrefix(part, "^"):
+		return caretConstraintAllowsVersion(strings.TrimPrefix(part, "^"), version)
+	case strings.HasPrefix(part, "~"):
+		return tildeConstraintAllowsVersion(strings.TrimPrefix(part, "~"), version)
+	case strings.HasPrefix(part, ">="):
+		return compareVersions(version, strings.TrimPrefix(part, ">=")) >= 0
+	case strings.HasPrefix(part, ">"):
+		return compareVersions(version, strings.TrimPrefix(part, ">")) > 0
+	case strings.HasPrefix(part, "<="):
+		return compareVersions(version, strings.TrimPrefix(part, "<=")) <= 0
+	case strings.HasPrefix(part, "<"):
+		return compareVersions(version, strings.TrimPrefix(part, "<")) < 0
+	case strings.HasPrefix(part, "="):
+		return compareVersions(version, strings.TrimPrefix(part, "=")) == 0
+	default:
+		return compareVersions(version, part) == 0
+	}
+}
+
+func caretConstraintAllowsVersion(base, version string) bool {
+	lower := parseVersionParts(base)
+	upper := lower
+	switch {
+	case lower.major > 0:
+		upper.major++
+		upper.minor = 0
+		upper.patch = 0
+	case lower.minor > 0:
+		upper.minor++
+		upper.patch = 0
+	default:
+		upper.patch++
+	}
+	return compareParsedVersions(parseVersionParts(version), lower) >= 0 && compareParsedVersions(parseVersionParts(version), upper) < 0
+}
+
+func tildeConstraintAllowsVersion(base, version string) bool {
+	lower := parseVersionParts(base)
+	upper := lower
+	if lower.segments >= 3 {
+		upper.minor++
+		upper.patch = 0
+	} else {
+		upper.major++
+		upper.minor = 0
+		upper.patch = 0
+	}
+	return compareParsedVersions(parseVersionParts(version), lower) >= 0 && compareParsedVersions(parseVersionParts(version), upper) < 0
+}
+
+type versionParts struct {
+	major      int
+	minor      int
+	patch      int
+	segments   int
+	prerelease string
+}
+
+func compareVersions(a, b string) int {
+	return compareParsedVersions(parseVersionParts(a), parseVersionParts(b))
+}
+
+func compareParsedVersions(a, b versionParts) int {
+	switch {
+	case a.major != b.major:
+		return compareInts(a.major, b.major)
+	case a.minor != b.minor:
+		return compareInts(a.minor, b.minor)
+	case a.patch != b.patch:
+		return compareInts(a.patch, b.patch)
+	case a.prerelease == b.prerelease:
+		return 0
+	case a.prerelease == "":
+		return 1
+	case b.prerelease == "":
+		return -1
+	default:
+		return strings.Compare(a.prerelease, b.prerelease)
+	}
+}
+
+func compareInts(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func parseVersionParts(version string) versionParts {
+	version = normalizeVersion(version)
+	if idx := strings.Index(version, "+"); idx >= 0 {
+		version = version[:idx]
+	}
+	base, prerelease, _ := strings.Cut(version, "-")
+	fields := strings.Split(base, ".")
+	parts := versionParts{segments: len(fields), prerelease: prerelease}
+	if len(fields) > 0 {
+		parts.major = parseLeadingInt(fields[0])
+	}
+	if len(fields) > 1 {
+		parts.minor = parseLeadingInt(fields[1])
+	}
+	if len(fields) > 2 {
+		parts.patch = parseLeadingInt(fields[2])
+	}
+	return parts
+}
+
+func parseLeadingInt(value string) int {
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(value[:end])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func normalizeDependencyName(kind ecosystem, name string) string {

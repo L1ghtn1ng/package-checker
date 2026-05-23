@@ -136,3 +136,160 @@ func TestScanDirectoryScansNodeModulesWithoutRootManifest(t *testing.T) {
 		t.Fatalf("unexpected findings: %+v", findings)
 	}
 }
+
+func TestScanDirectoryMatchesComposerConstraintVersions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	data := `{
+		"require": {
+			"laravel-lang/lang": "^1.0.2",
+			"illuminate/support": "^11.45.3|^12.41.1|^13.0",
+			"vendor/mismatch": "^2.0.0"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"), []byte(data), 0o644); err != nil {
+		t.Fatalf("write composer.json: %v", err)
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, []feedEntry{
+		{Namespace: "laravel-lang", Name: "lang", Version: "1.0.2", Type: "composer"},
+		{Name: "illuminate/support", Version: "12.41.1", Type: "composer"},
+		{Name: "vendor/mismatch", Version: "1.0.0", Type: "composer"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 1 {
+		t.Fatalf("unexpected scanned files: got %d want 1", scannedFiles)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Dependency.Name)
+	}
+	want := []string{"illuminate/support", "laravel-lang/lang"}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestComposerConstraintAllowsVersionEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		spec    string
+		version string
+		want    bool
+	}{
+		{
+			name:    "stable exact does not allow prerelease",
+			spec:    "1.0.0",
+			version: "1.0.0-beta",
+			want:    false,
+		},
+		{
+			name:    "stable caret does not allow prerelease below lower bound",
+			spec:    "^1.0.0",
+			version: "1.0.0-beta",
+			want:    false,
+		},
+		{
+			name:    "explicit prerelease allows matching prerelease",
+			spec:    "1.0.0-beta",
+			version: "1.0.0-beta",
+			want:    true,
+		},
+		{
+			name:    "tilde major shorthand allows next minor before next major",
+			spec:    "~1",
+			version: "1.9.0",
+			want:    true,
+		},
+		{
+			name:    "tilde minor shorthand allows next minor before next major",
+			spec:    "~1.2",
+			version: "1.9.0",
+			want:    true,
+		},
+		{
+			name:    "tilde minor shorthand rejects next major",
+			spec:    "~1.2",
+			version: "2.0.0",
+			want:    false,
+		},
+		{
+			name:    "tilde patch shorthand rejects next minor",
+			spec:    "~1.2.3",
+			version: "1.3.0",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := composerConstraintAllowsVersion(tt.spec, tt.version)
+			if got != tt.want {
+				t.Fatalf("composerConstraintAllowsVersion(%q, %q) = %t, want %t", tt.spec, tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanDirectoryMatchesLockfileDependencies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"package-lock.json": `{
+			"lockfileVersion": 3,
+			"packages": {
+				"": {"name": "app", "version": "1.0.0"},
+				"node_modules/plain": {"version": "1.2.3"},
+				"node_modules/@scope/pkg": {"version": "4.5.6"}
+			}
+		}`,
+		"composer.lock": `{
+			"packages": [
+				{"name": "laravel-lang/lang", "version": "1.0.2"},
+				{"name": "vendor/mismatch", "version": "2.0.0"}
+			]
+		}`,
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, []feedEntry{
+		{Name: "plain", Version: "1.2.3", Type: "npm"},
+		{Namespace: "scope", Name: "pkg", Version: "4.5.6", Type: "npm"},
+		{Namespace: "laravel-lang", Name: "lang", Version: "1.0.2", Type: "composer"},
+		{Name: "vendor/mismatch", Version: "1.0.0", Type: "composer"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 2 {
+		t.Fatalf("unexpected scanned files: got %d want 2", scannedFiles)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, string(finding.Dependency.Ecosystem)+":"+finding.Dependency.Name+"@"+finding.Dependency.Version)
+	}
+	want := []string{
+		"npm:@scope/pkg@4.5.6",
+		"npm:plain@1.2.3",
+		"php:laravel-lang/lang@1.0.2",
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}

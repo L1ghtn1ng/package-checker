@@ -4,10 +4,10 @@
 
 Supported manifests:
 
-- npm: `package.json`
+- npm: `package.json`, `package-lock.json`
 - Python/PyPI: `pyproject.toml`, `requirements.txt`
 - Go modules: `go.mod`
-- PHP/Composer: `composer.json`
+- PHP/Composer: `composer.json`, `composer.lock`
 
 When a project has `node_modules`, `package-checker` also scans installed npm package roots under `node_modules/<package>` and `node_modules/@scope/<package>`. It does not recursively walk nested dependency trees.
 

@@ -134,10 +134,11 @@ type cachedFeed struct {
 }
 
 type dependencyRef struct {
-	Name      string
-	Version   string
-	Source    string
-	Ecosystem ecosystem
+	Name        string
+	Version     string
+	VersionSpec string
+	Source      string
+	Ecosystem   ecosystem
 }
 
 type finding struct {
