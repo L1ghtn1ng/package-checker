@@ -43,7 +43,7 @@ so its hard to keep up with all of them. This tool is a good way to keep up with
 Linux release binaries are built as PIE executables with immediate binding enabled so they expose `GNU_RELRO`, `BIND_NOW`, and `PIE` in the ELF metadata.
 
 ## Dependencies
-Requires Go 1.26 to build from source
+Requires Go 1.27.x to build from source
 
 This tool only uses a 3rd party library to support toml based configuration files
 github.com/pelletier/go-toml/v2 other than that its all golang standard library as golang does not have support for toml built in.

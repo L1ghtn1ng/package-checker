@@ -318,7 +318,7 @@ func parseGoMod(path string) ([]dependencyRef, error) {
 	seen := map[string]struct{}{}
 	deps := make([]dependencyRef, 0)
 	inRequireBlock := false
-	for _, rawLine := range strings.Split(string(data), "\n") {
+	for rawLine := range strings.SplitSeq(string(data), "\n") {
 		line := stripInlineComment(rawLine)
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -332,8 +332,8 @@ func parseGoMod(path string) ([]dependencyRef, error) {
 			inRequireBlock = false
 			continue
 		}
-		if strings.HasPrefix(trimmed, "require ") {
-			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "require "))
+		if after, ok := strings.CutPrefix(trimmed, "require "); ok {
+			trimmed = strings.TrimSpace(after)
 		} else if !inRequireBlock {
 			continue
 		}
@@ -576,8 +576,8 @@ func poetryExactVersion(spec any) string {
 }
 
 func stripInlineComment(line string) string {
-	if idx := strings.Index(line, "//"); idx >= 0 {
-		return line[:idx]
+	if before, _, ok := strings.Cut(line, "//"); ok {
+		return before
 	}
 	return line
 }

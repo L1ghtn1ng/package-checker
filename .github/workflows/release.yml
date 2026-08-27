@@ -26,6 +26,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+          check-latest: true
 
       - name: Run tests
         run: go test ./...
@@ -63,6 +64,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+          check-latest: true
 
       - name: Build darwin ${{ matrix.goarch }} binary
         env:
