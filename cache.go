@@ -18,6 +18,7 @@ const socketFeedStartID = 16
 
 // Socket campaign IDs are sparse before the requested campaign 25 endpoint.
 const socketFeedMinimumStopID = 25
+const socketFeedConsecutiveNotFoundLimit = 3
 const socketUserAgent = "package-checker/1.0"
 
 func loadFeed(ctx context.Context, client *http.Client, feedURL, cachePath string, now time.Time) ([]feedEntry, string, error) {
@@ -33,7 +34,8 @@ func loadFeed(ctx context.Context, client *http.Client, feedURL, cachePath strin
 			Entries:   entries,
 		}
 		if writeErr := writeCachedFeed(cachePath, cache); writeErr != nil {
-			return entries, "remote", nil
+			// Fresh remote entries remain usable even when the optional cache cannot be updated.
+			return entries, "remote", nil //nolint:nilerr
 		}
 		return entries, "remote", nil
 	}
@@ -51,17 +53,23 @@ func fetchFeed(ctx context.Context, client *http.Client, feedURL string) ([]feed
 
 func fetchSocketFeed(ctx context.Context, client *http.Client, feedURL string, startID int) ([]feedEntry, error) {
 	entries := make([]feedEntry, 0)
+	consecutiveNotFound := 0
 	for id := startID; ; id++ {
 		pageEntries, err := fetchSocketFeedPage(ctx, client, socketFeedPageURL(feedURL, id))
 		if err != nil {
 			if errors.Is(err, errFeedPageNotFound) {
-				if id >= socketFeedMinimumStopID {
+				if id < socketFeedMinimumStopID {
+					continue
+				}
+				consecutiveNotFound++
+				if consecutiveNotFound >= socketFeedConsecutiveNotFoundLimit {
 					return entries, nil
 				}
 				continue
 			}
 			return nil, err
 		}
+		consecutiveNotFound = 0
 		entries = append(entries, pageEntries...)
 	}
 }
@@ -87,7 +95,9 @@ func fetchSocketFeedPage(ctx context.Context, client *http.Client, feedURL strin
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errFeedPageNotFound
@@ -143,7 +153,8 @@ func (p socketFeedPayload) entries() []feedEntry {
 func readCachedFeed(cachePath string) (cachedFeed, error) {
 	var cache cachedFeed
 
-	data, err := os.ReadFile(cachePath)
+	// cachePath is either user-selected or resolved inside the user's cache directory.
+	data, err := os.ReadFile(cachePath) //nolint:gosec
 	if err != nil {
 		return cache, err
 	}
@@ -160,7 +171,7 @@ func readCachedFeed(cachePath string) (cachedFeed, error) {
 }
 
 func writeCachedFeed(cachePath string, cache cachedFeed) error {
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 
@@ -170,7 +181,7 @@ func writeCachedFeed(cachePath string, cache cachedFeed) error {
 	}
 
 	tmpPath := cachePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return fmt.Errorf("write temp cache: %w", err)
 	}
 

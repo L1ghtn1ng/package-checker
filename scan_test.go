@@ -19,7 +19,7 @@ func TestScanDirectoryMatchesSocketPackagesByEcosystemNameAndVersion(t *testing.
 		"requirements.txt": "safe==1.0.0\n",
 	}
 	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
@@ -63,7 +63,7 @@ func TestScanDirectoryMatchesInstalledNodeModulesPackages(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{}}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{}}`), 0o600); err != nil {
 		t.Fatalf("write root package.json: %v", err)
 	}
 
@@ -76,10 +76,10 @@ func TestScanDirectoryMatchesInstalledNodeModulesPackages(t *testing.T) {
 	}
 	for name, data := range nodeModulesFiles {
 		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatalf("create %s parent: %v", name, err)
 		}
-		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
@@ -116,10 +116,10 @@ func TestScanDirectoryScansNodeModulesWithoutRootManifest(t *testing.T) {
 
 	dir := t.TempDir()
 	packageJSONPath := filepath.Join(dir, "node_modules", "plain", "package.json")
-	if err := os.MkdirAll(filepath.Dir(packageJSONPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(packageJSONPath), 0o700); err != nil {
 		t.Fatalf("create node_modules package dir: %v", err)
 	}
-	if err := os.WriteFile(packageJSONPath, []byte(`{"name":"plain","version":"1.2.3"}`), 0o644); err != nil {
+	if err := os.WriteFile(packageJSONPath, []byte(`{"name":"plain","version":"1.2.3"}`), 0o600); err != nil {
 		t.Fatalf("write package.json: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestScanDirectoryMatchesComposerConstraintVersions(t *testing.T) {
 			"vendor/mismatch": "^2.0.0"
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(dir, "composer.json"), []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "composer.json"), []byte(data), 0o600); err != nil {
 		t.Fatalf("write composer.json: %v", err)
 	}
 
@@ -261,7 +261,7 @@ func TestScanDirectoryMatchesLockfileDependencies(t *testing.T) {
 		}`,
 	}
 	for name, data := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}

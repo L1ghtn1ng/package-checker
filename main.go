@@ -2,23 +2,29 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+
+	"package-checker/internal/selfupdate"
 )
 
 const defaultFeedURL = "https://socket.dev/api/public/supply-chain-attacks/%d/packages"
 
 type config struct {
-	dir       string
-	cacheFile string
-	feedURL   string
-	showHelp  bool
-	showVer   bool
+	dir          string
+	cacheFile    string
+	feedURL      string
+	showHelp     bool
+	showVer      bool
+	selfUpdate   bool
+	noSelfUpdate bool
 }
 
 func main() {
@@ -33,54 +39,85 @@ func run(ctx context.Context, stdout, stderr io.Writer, args []string) int {
 func runWithClient(ctx context.Context, stdout, stderr io.Writer, args []string, client *http.Client) int {
 	cfg, err := parseFlags(stderr, args)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
+		return reportRunError(stderr, "%v", err)
 	}
 
 	if cfg.showHelp {
-		printUsage(stdout)
+		if err := printUsage(stdout); err != nil {
+			return reportRunError(stderr, "write output: %v", err)
+		}
 		return 0
 	}
 
 	if cfg.showVer {
-		fmt.Fprintf(stdout, "%s version %s (commit %s, built %s)\n", binaryName, version, commit, date)
+		if err := writeFormatted(stdout, "%s version %s (commit %s, built %s)\n", binaryName, version, commit, date); err != nil {
+			return reportRunError(stderr, "write output: %v", err)
+		}
 		return 0
+	}
+
+	if cfg.selfUpdate {
+		result, err := runSelfUpdate(ctx, stderr, true)
+		if err != nil {
+			return reportRunError(stderr, "self-update: %v", err)
+		}
+		if result.Installed {
+			if err := writeFormatted(stdout, "Updated %s from %s to %s.\n", binaryName, result.CurrentVersion, result.LatestVersion); err != nil {
+				return reportRunError(stderr, "write output: %v", err)
+			}
+		} else if err := writeFormatted(stdout, "%s %s is already up to date.\n", binaryName, result.CurrentVersion); err != nil {
+			return reportRunError(stderr, "write output: %v", err)
+		}
+		return 0
+	}
+
+	if !cfg.noSelfUpdate {
+		result, updateErr := runSelfUpdate(ctx, stderr, false)
+		if updateErr != nil {
+			reportRunWarning(stderr, "self-update check failed: %v", updateErr)
+		} else if result.Installed {
+			reportRunWarning(stderr, "updated %s from %s to %s; the new version will be used on the next invocation", binaryName, result.CurrentVersion, result.LatestVersion)
+		}
 	}
 
 	cachePath, err := resolveCachePath(cfg.cacheFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: resolve cache path: %v\n", err)
-		return 2
+		return reportRunError(stderr, "resolve cache path: %v", err)
 	}
 
 	entries, source, err := loadFeed(ctx, client, cfg.feedURL, cachePath, time.Now())
 	if err != nil {
-		fmt.Fprintf(stderr, "error: load feed: %v\n", err)
-		return 2
+		return reportRunError(stderr, "load feed: %v", err)
 	}
 
 	findings, scannedFiles, err := scanDirectory(cfg.dir, entries)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 2
+		return reportRunError(stderr, "%v", err)
 	}
 
 	if scannedFiles == 0 {
-		fmt.Fprintf(stderr, "error: no supported package manifests found in %s\n", cfg.dir)
-		return 2
+		return reportRunError(stderr, "no supported package manifests found in %s", cfg.dir)
 	}
 
-	fmt.Fprintf(stdout, "Feed source: %s\n", source)
-	fmt.Fprintf(stdout, "Cache file: %s\n", cachePath)
+	if err := writeFormatted(stdout, "Feed source: %s\n", source); err != nil {
+		return reportRunError(stderr, "write output: %v", err)
+	}
+	if err := writeFormatted(stdout, "Cache file: %s\n", cachePath); err != nil {
+		return reportRunError(stderr, "write output: %v", err)
+	}
 
 	if len(findings) == 0 {
-		fmt.Fprintf(stdout, "No malicious packages detected in %d package manifest(s).\n", scannedFiles)
+		if err := writeFormatted(stdout, "No malicious packages detected in %d package manifest(s).\n", scannedFiles); err != nil {
+			return reportRunError(stderr, "write output: %v", err)
+		}
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "Detected %d malicious package match(es):\n", len(findings))
+	if err := writeFormatted(stdout, "Detected %d malicious package match(es):\n", len(findings)); err != nil {
+		return reportRunError(stderr, "write output: %v", err)
+	}
 	for _, finding := range findings {
-		fmt.Fprintf(
+		if err := writeFormatted(
 			stdout,
 			"- %s%s in %s [%s, %s, published %s]\n",
 			finding.Dependency.Name,
@@ -89,7 +126,9 @@ func runWithClient(ctx context.Context, stdout, stderr io.Writer, args []string,
 			feedEcosystem(finding.Feed),
 			finding.Feed.Type,
 			finding.Feed.DatePublished,
-		)
+		); err != nil {
+			return reportRunError(stderr, "write output: %v", err)
+		}
 	}
 
 	return 1
@@ -105,15 +144,18 @@ func parseFlags(stderr io.Writer, args []string) (config, error) {
 	fs.StringVar(&cfg.feedURL, "feed-url", defaultFeedURL, "URL of the malicious package JSON feed")
 	fs.BoolVar(&cfg.showHelp, "help", false, "show help")
 	fs.BoolVar(&cfg.showVer, "version", false, "show version information")
+	fs.BoolVar(&cfg.selfUpdate, "self-update", false, "install the latest stable GitHub release and exit")
+	fs.BoolVar(&cfg.noSelfUpdate, "no-self-update", false, "skip the automatic GitHub release check")
 
 	if err := fs.Parse(args); err != nil {
-		printUsage(stderr)
-		return cfg, err
+		return cfg, withUsageError(stderr, err)
 	}
 
 	if fs.NArg() > 0 {
-		printUsage(stderr)
-		return cfg, fmt.Errorf("unexpected positional arguments: %v", fs.Args())
+		return cfg, withUsageError(stderr, fmt.Errorf("unexpected positional arguments: %v", fs.Args()))
+	}
+	if cfg.selfUpdate && cfg.noSelfUpdate {
+		return cfg, withUsageError(stderr, errors.New("--self-update and --no-self-update cannot be used together"))
 	}
 
 	cfg.dir = filepath.Clean(cfg.dir)
@@ -124,16 +166,50 @@ func parseFlags(stderr io.Writer, args []string) (config, error) {
 	return cfg, nil
 }
 
-func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "Usage: %s [flags]\n\n", binaryName)
-	fmt.Fprintln(w, "Scans package manifests in a directory against the Socket supply-chain attack package feed.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Flags:")
-	fmt.Fprintln(w, "  --dir string         Directory containing package manifests to scan (default \".\")")
-	fmt.Fprintln(w, "  --cache-file string  Path to the cached malicious package feed")
-	fmt.Fprintf(w, "  --feed-url string    Socket feed URL pattern to fetch; use %%d for the campaign number (default %q)\n", defaultFeedURL)
-	fmt.Fprintln(w, "  --version            Show version information")
-	fmt.Fprintln(w, "  --help               Show help")
+func printUsage(w io.Writer) error {
+	return writeFormatted(
+		w,
+		"Usage: %s [flags]\n\n"+
+			"Scans package manifests in a directory against the Socket supply-chain attack package feed.\n\n"+
+			"Flags:\n"+
+			"  --dir string         Directory containing package manifests to scan (default \".\")\n"+
+			"  --cache-file string  Path to the cached malicious package feed\n"+
+			"  --feed-url string    Socket feed URL pattern to fetch; use %%d for the campaign number (default %q)\n"+
+			"  --self-update        Install the latest stable GitHub release and exit\n"+
+			"  --no-self-update     Skip the automatic GitHub release check\n"+
+			"  --version            Show version information\n"+
+			"  --help               Show help\n",
+		binaryName,
+		defaultFeedURL,
+	)
+}
+
+func withUsageError(w io.Writer, cause error) error {
+	if err := printUsage(w); err != nil {
+		return errors.Join(cause, fmt.Errorf("write usage: %w", err))
+	}
+	return cause
+}
+
+func writeFormatted(w io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(w, format, args...)
+	return err
+}
+
+func reportRunError(w io.Writer, format string, args ...any) int {
+	// There is no useful recovery if the error stream itself is unavailable.
+	_ = writeFormatted(w, "error: "+format+"\n", args...)
+	return 2
+}
+
+func reportRunWarning(w io.Writer, format string, args ...any) {
+	// A failed warning write cannot affect the requested scan or update operation.
+	_ = writeFormatted(w, "warning: "+format+"\n", args...)
+}
+
+func runSelfUpdate(ctx context.Context, stderr io.Writer, force bool) (selfupdate.Result, error) {
+	updater := selfupdate.New(version, commit, date, log.New(stderr, "", 0))
+	return updater.CheckAndInstall(ctx, force)
 }
 
 func formatDependencyVersion(version string) string {

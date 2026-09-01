@@ -45,12 +45,12 @@ func TestLoadFeedUsesFreshCache(t *testing.T) {
 	if len(entries) != 1 || source != "cache" {
 		t.Fatalf("unexpected second result: entries=%d source=%s", len(entries), source)
 	}
-	if hits.Load() != 10 {
-		t.Fatalf("expected ten upstream hits, got %d", hits.Load())
+	if hits.Load() != 12 {
+		t.Fatalf("expected twelve upstream hits, got %d", hits.Load())
 	}
 }
 
-func TestFetchSocketFeedSkipsSparse404sUntilMinimumStopID(t *testing.T) {
+func TestFetchSocketFeedStopsAfterThreeConsecutive404s(t *testing.T) {
 	t.Parallel()
 
 	seenPaths := make([]string, 0)
@@ -70,6 +70,8 @@ func TestFetchSocketFeedSkipsSparse404sUntilMinimumStopID(t *testing.T) {
 				return jsonResponse(req, http.StatusOK, `{"data":[{"name":"requests","version":"2.31.0","type":"pypi"}]}`), nil
 			case "/attacks/25/packages":
 				return jsonResponse(req, http.StatusOK, `{"packages":[{"namespace":"laravel-lang","name":"lang","version":"1.0.2","type":"composer"}]}`), nil
+			case "/attacks/28/packages":
+				return jsonResponse(req, http.StatusOK, `{"packages":[{"name":"late-package","version":"4.5.6","type":"npm"}]}`), nil
 			default:
 				return jsonResponse(req, http.StatusNotFound, `{"error":"not found"}`), nil
 			}
@@ -80,8 +82,11 @@ func TestFetchSocketFeedSkipsSparse404sUntilMinimumStopID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch feed: %v", err)
 	}
-	if len(entries) != 3 {
+	if len(entries) != 4 {
 		t.Fatalf("unexpected entries: %+v", entries)
+	}
+	if entries[3].Name != "late-package" {
+		t.Fatalf("expected package after sparse 404s, got %+v", entries[3])
 	}
 	wantPaths := []string{
 		"/attacks/16/packages",
@@ -95,6 +100,11 @@ func TestFetchSocketFeedSkipsSparse404sUntilMinimumStopID(t *testing.T) {
 		"/attacks/24/packages",
 		"/attacks/25/packages",
 		"/attacks/26/packages",
+		"/attacks/27/packages",
+		"/attacks/28/packages",
+		"/attacks/29/packages",
+		"/attacks/30/packages",
+		"/attacks/31/packages",
 	}
 	if strings.Join(seenPaths, ",") != strings.Join(wantPaths, ",") {
 		t.Fatalf("unexpected request paths: got %v want %v", seenPaths, wantPaths)
@@ -218,7 +228,7 @@ func TestLoadFeedUsesFreshEntriesWhenCacheWriteFails(t *testing.T) {
 	t.Parallel()
 
 	cachePath := filepath.Join(t.TempDir(), "cache-dir")
-	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+	if err := os.MkdirAll(cachePath, 0o700); err != nil {
 		t.Fatalf("create cache dir: %v", err)
 	}
 

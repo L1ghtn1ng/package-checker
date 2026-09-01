@@ -19,7 +19,7 @@ func TestParsePackageJSON(t *testing.T) {
 		"peerDependencies": {"@scope/delta":"1.0.0"}
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write package.json: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestParsePackageLock(t *testing.T) {
 		}
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write package-lock.json: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestParsePackageLockV1Dependencies(t *testing.T) {
 		}
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write package-lock.json: %v", err)
 	}
 
@@ -127,7 +127,7 @@ black = "^24.0"
 pytest = "^8.0"
 `
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write pyproject.toml: %v", err)
 	}
 
@@ -161,7 +161,7 @@ continued==2.3.4 \
 hashed==3.4.5 --hash=sha256:abc
 `
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write requirements.txt: %v", err)
 	}
 
@@ -206,7 +206,7 @@ require (
 )
 `
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestParseComposerJSON(t *testing.T) {
 		}
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write composer.json: %v", err)
 	}
 
@@ -281,7 +281,7 @@ func TestParseComposerJSONWithProjectMetadataAndConstraints(t *testing.T) {
 		}
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write composer.json: %v", err)
 	}
 
@@ -316,7 +316,7 @@ func TestParseComposerLock(t *testing.T) {
 		]
 	}`
 
-	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write composer.lock: %v", err)
 	}
 

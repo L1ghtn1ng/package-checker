@@ -6,6 +6,7 @@ DIST_DIR ?= dist
 
 GO ?= go
 GOFLAGS ?=
+GOLANGCI_LINT ?= golangci-lint
 HOST_OS := $(shell uname -s | tr A-Z a-z)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 LINUX_LDFLAGS := $(LDFLAGS) -bindnow
@@ -16,7 +17,7 @@ else
 BUILD_FLAGS := -ldflags "$(LDFLAGS)"
 endif
 
-.PHONY: all build test vet check clean release linux linux-amd64 linux-arm64 darwin darwin-amd64 darwin-arm64 windows windows-amd64
+.PHONY: all build fmt-check lint test vet fix check clean release linux linux-amd64 linux-arm64 darwin darwin-amd64 darwin-arm64 windows windows-amd64
 
 all: build
 
@@ -24,13 +25,22 @@ build:
 	@mkdir -p $(DIST_DIR)
 	$(GO) build $(GOFLAGS) $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY) .
 
+fmt-check:
+	$(GOLANGCI_LINT) fmt --diff
+
+lint:
+	$(GOLANGCI_LINT) run ./...
+
 test:
 	$(GO) test ./...
 
 vet:
 	$(GO) vet ./...
 
-check: test vet
+fix:
+	$(GO) fix ./...
+
+check: fmt-check lint test vet
 
 release: linux darwin windows
 

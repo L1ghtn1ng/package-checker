@@ -78,7 +78,7 @@ type poetryGroupManifest struct {
 }
 
 func parsePackageJSON(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func parsePackageJSON(path string) ([]dependencyRef, error) {
 }
 
 func parseInstalledPackageJSON(path, fallbackName string) (dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return dependencyRef{}, err
 	}
@@ -146,7 +146,7 @@ func parseInstalledPackageJSON(path, fallbackName string) (dependencyRef, error)
 }
 
 func parsePackageLock(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ func parsePackageLock(path string) ([]dependencyRef, error) {
 }
 
 func parsePyproject(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func parsePyproject(path string) ([]dependencyRef, error) {
 }
 
 func parseRequirements(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func parseRequirements(path string) ([]dependencyRef, error) {
 }
 
 func parseGoMod(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +363,7 @@ func parseGoMod(path string) ([]dependencyRef, error) {
 }
 
 func parseComposerJSON(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +402,7 @@ func parseComposerJSON(path string) ([]dependencyRef, error) {
 }
 
 func parseComposerLock(path string) ([]dependencyRef, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifestFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -443,6 +443,11 @@ func parseComposerLock(path string) ([]dependencyRef, error) {
 	})
 
 	return deps, nil
+}
+
+func readManifestFile(path string) ([]byte, error) {
+	// Reading caller-selected manifest paths is the scanner's intended operation.
+	return os.ReadFile(path) //nolint:gosec
 }
 
 func packageLockPackageName(packagePath string) string {

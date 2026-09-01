@@ -301,6 +301,8 @@ func feedPackageName(entry feedEntry, kind ecosystem) string {
 			return name
 		}
 		return strings.TrimRight(namespace, "/") + "/" + name
+	case ecosystemPython:
+		return name
 	default:
 		return name
 	}
@@ -332,6 +334,8 @@ func dependencyVersionMatches(dep dependencyRef, feedVersion string) bool {
 	switch dep.Ecosystem {
 	case ecosystemPHP:
 		return composerConstraintAllowsVersion(dep.VersionSpec, feedVersion)
+	case ecosystemNPM, ecosystemPython, ecosystemGo:
+		return false
 	default:
 		return false
 	}
