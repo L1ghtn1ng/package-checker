@@ -19,7 +19,6 @@ const socketFeedStartID = 16
 // Socket campaign IDs are sparse before the requested campaign 25 endpoint.
 const socketFeedMinimumStopID = 25
 const socketFeedConsecutiveNotFoundLimit = 3
-const socketUserAgent = "package-checker/1.0"
 
 func loadFeed(ctx context.Context, client *http.Client, feedURL, cachePath string, now time.Time) ([]feedEntry, string, error) {
 	cache, cacheErr := readCachedFeed(cachePath)
@@ -89,7 +88,7 @@ func fetchSocketFeedPage(ctx context.Context, client *http.Client, feedURL strin
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", socketUserAgent)
+	req.Header.Set("User-Agent", socketFeedUserAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -112,6 +111,10 @@ func fetchSocketFeedPage(ctx context.Context, client *http.Client, feedURL strin
 	}
 
 	return payload.entries(), nil
+}
+
+func socketFeedUserAgent() string {
+	return binaryName + "/" + version
 }
 
 type socketFeedPayload struct {

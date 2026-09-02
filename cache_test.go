@@ -110,8 +110,9 @@ func TestFetchSocketFeedStopsAfterThreeConsecutive404s(t *testing.T) {
 		t.Fatalf("unexpected request paths: got %v want %v", seenPaths, wantPaths)
 	}
 	for _, userAgent := range seenUserAgents {
-		if userAgent != socketUserAgent {
-			t.Fatalf("unexpected user agent: %q", userAgent)
+		wantUserAgent := binaryName + "/" + version
+		if userAgent != wantUserAgent {
+			t.Fatalf("unexpected user agent: got %q want %q", userAgent, wantUserAgent)
 		}
 	}
 }
