@@ -7,6 +7,9 @@ DIST_DIR ?= dist
 GO ?= go
 GOFLAGS ?=
 GOLANGCI_LINT ?= golangci-lint
+GORELEASER ?= goreleaser
+PROGRAM_VERSION = $(word 3,$(shell $(GO) run . --version))
+PREVIOUS_RELEASE_TAG = $(shell git describe --tags --abbrev=0 2>/dev/null)
 HOST_OS := $(shell uname -s | tr A-Z a-z)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 LINUX_LDFLAGS := $(LDFLAGS) -bindnow
@@ -17,7 +20,7 @@ else
 BUILD_FLAGS := -ldflags "$(LDFLAGS)"
 endif
 
-.PHONY: all build fmt-check lint test vet fix check clean release linux linux-amd64 linux-arm64 darwin darwin-amd64 darwin-arm64 windows windows-amd64
+.PHONY: all build fmt-check lint test vet fix check snapshot clean release linux linux-amd64 linux-arm64 darwin darwin-amd64 darwin-arm64 windows windows-amd64
 
 all: build
 
@@ -41,6 +44,9 @@ fix:
 	$(GO) fix ./...
 
 check: fmt-check lint test vet
+
+snapshot:
+	GORELEASER_PREVIOUS_TAG=$(PREVIOUS_RELEASE_TAG) GORELEASER_CURRENT_TAG=v$(PROGRAM_VERSION) $(GORELEASER) release --snapshot --clean
 
 release: linux darwin windows
 

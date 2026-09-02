@@ -15,6 +15,14 @@ Release builds publish Linux packages (`.deb`, `.rpm`, Arch package artifact), m
 
 CI also cross-compiles the release targets for Linux, macOS Intel, macOS Apple Silicon, and Windows to catch portability regressions before release tags are cut.
 
+Build all release archives and native packages locally without publishing them:
+
+```bash
+make snapshot
+```
+
+The snapshot target uses the version reported by the program for package metadata without creating a Git tag. Published releases continue to derive their version from the release tag.
+
 ## Usage
 
 ```bash

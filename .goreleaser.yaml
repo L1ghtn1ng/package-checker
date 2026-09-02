@@ -63,9 +63,14 @@ nfpms:
     description: Scan package manifests for dependencies listed in Socket supply-chain attack campaigns.
     maintainer: Package Checker Maintainers <opensource@example.invalid>
     bindir: /usr/local/bin
-    homepage: https://github.com/{{ .Env.GITHUB_REPOSITORY }}
-    license: UNLICENSED
+    homepage: https://github.com/L1ghtn1ng/package-checker
+    license: Apache-2.0
     contents:
       - src: ./README.md
         dst: /usr/share/doc/package-checker/README.md
-        type: doc
+        file_info:
+          mode: 0644
+      - src: ./LICENSE
+        dst: /usr/share/doc/package-checker/LICENSE
+        file_info:
+          mode: 0644
