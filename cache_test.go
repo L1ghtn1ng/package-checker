@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,6 +115,54 @@ func TestFetchSocketFeedStopsAfterThreeConsecutive404s(t *testing.T) {
 		if userAgent != wantUserAgent {
 			t.Fatalf("unexpected user agent: got %q want %q", userAgent, wantUserAgent)
 		}
+	}
+}
+
+func TestFetchSocketFeedPageRetriesTimeout(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if attempts.Add(1) < socketFeedMaxAttempts {
+				return nil, context.DeadlineExceeded
+			}
+			return jsonResponse(req, http.StatusOK, `[{"name":"recovered","type":"npm"}]`), nil
+		}),
+	}
+
+	entries, err := fetchSocketFeedPage(context.Background(), client, "https://example.test/attacks/34/packages")
+	if err != nil {
+		t.Fatalf("fetch feed page: %v", err)
+	}
+	if attempts.Load() != socketFeedMaxAttempts {
+		t.Fatalf("unexpected attempts: got %d want %d", attempts.Load(), socketFeedMaxAttempts)
+	}
+	if len(entries) != 1 || entries[0].Name != "recovered" {
+		t.Fatalf("unexpected entries: %+v", entries)
+	}
+}
+
+func TestFetchSocketFeedPageStopsRetryingWhenContextIsCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var attempts atomic.Int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return nil, context.Canceled
+		}),
+	}
+
+	_, err := fetchSocketFeedPage(ctx, client, "https://example.test/attacks/34/packages")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("fetch feed page error = %v, want context canceled", err)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("unexpected attempts after cancellation: got %d want 1", attempts.Load())
 	}
 }
 

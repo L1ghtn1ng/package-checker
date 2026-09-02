@@ -19,6 +19,8 @@ const socketFeedStartID = 16
 // Socket campaign IDs are sparse before the requested campaign 25 endpoint.
 const socketFeedMinimumStopID = 25
 const socketFeedConsecutiveNotFoundLimit = 3
+const socketFeedMaxAttempts = 3
+const socketFeedRetryInitialDelay = 250 * time.Millisecond
 
 func loadFeed(ctx context.Context, client *http.Client, feedURL, cachePath string, now time.Time) ([]feedEntry, string, error) {
 	cache, cacheErr := readCachedFeed(cachePath)
@@ -83,38 +85,83 @@ func socketFeedPageURL(feedURL string, id int) string {
 }
 
 func fetchSocketFeedPage(ctx context.Context, client *http.Client, feedURL string) ([]feedEntry, error) {
+	var lastErr error
+	for attempt := range socketFeedMaxAttempts {
+		entries, retry, err := fetchSocketFeedPageOnce(ctx, client, feedURL)
+		if err == nil || !retry {
+			return entries, err
+		}
+		lastErr = err
+
+		if attempt == socketFeedMaxAttempts-1 {
+			break
+		}
+		if err := waitForSocketFeedRetry(ctx, socketFeedRetryInitialDelay<<attempt); err != nil {
+			return nil, fmt.Errorf("wait to retry request: %w", err)
+		}
+	}
+
+	return nil, fmt.Errorf("request failed after %d attempts: %w", socketFeedMaxAttempts, lastErr)
+}
+
+func fetchSocketFeedPageOnce(ctx context.Context, client *http.Client, feedURL string) ([]feedEntry, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return nil, false, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", socketFeedUserAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, ctx.Err() == nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errFeedPageNotFound
+		return nil, false, errFeedPageNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+		return nil, isRetryableFeedStatus(resp.StatusCode), fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
 	var payload socketFeedPayload
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, false, fmt.Errorf("decode response: %w", err)
 	}
 
-	return payload.entries(), nil
+	return payload.entries(), false, nil
 }
 
 func socketFeedUserAgent() string {
 	return binaryName + "/" + version
+}
+
+func isRetryableFeedStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func waitForSocketFeedRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type socketFeedPayload struct {

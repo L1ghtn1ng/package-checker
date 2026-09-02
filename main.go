@@ -17,6 +17,8 @@ import (
 
 const defaultFeedURL = "https://socket.dev/api/public/supply-chain-attacks/%d/packages"
 
+const defaultHTTPTimeout = 2 * time.Minute
+
 type config struct {
 	dir          string
 	cacheFile    string
@@ -32,7 +34,7 @@ func main() {
 }
 
 func run(ctx context.Context, stdout, stderr io.Writer, args []string) int {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: defaultHTTPTimeout}
 	return runWithClient(ctx, stdout, stderr, args, client)
 }
 
