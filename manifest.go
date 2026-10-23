@@ -81,6 +81,8 @@ type cargoManifest struct {
 	cargoDependencyTables
 	Target    map[string]cargoDependencyTables `toml:"target"`
 	Workspace struct {
+		Members      []string       `toml:"members"`
+		Exclude      []string       `toml:"exclude"`
 		Dependencies map[string]any `toml:"dependencies"`
 	} `toml:"workspace"`
 }
@@ -514,7 +516,18 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 	for _, target := range manifest.Target {
 		addTables(target)
 	}
-	addTable(manifest.Workspace.Dependencies)
+
+	// [workspace.dependencies] only declares crates for members to opt into, so
+	// report an entry only when a workspace member inherits it.
+	memberInherited, err := cargoMemberInheritedDependencies(filepath.Dir(path), manifest.Workspace.Members, manifest.Workspace.Exclude)
+	if err != nil {
+		return nil, err
+	}
+	for key, spec := range manifest.Workspace.Dependencies {
+		if _, ok := memberInherited[key]; ok {
+			addTable(map[string]any{key: spec})
+		}
+	}
 
 	slices.SortFunc(deps, func(a, b dependencyRef) int {
 		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
@@ -524,6 +537,72 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 	})
 
 	return deps, nil
+}
+
+// cargoMemberInheritedDependencies returns the dependency keys that workspace
+// member manifests inherit with workspace = true.
+func cargoMemberInheritedDependencies(rootDir string, members, exclude []string) (map[string]struct{}, error) {
+	inherited := map[string]struct{}{}
+	excluded := make([]string, 0, len(exclude))
+	for _, pattern := range exclude {
+		excluded = append(excluded, filepath.Clean(filepath.FromSlash(pattern)))
+	}
+
+	for _, member := range members {
+		memberPattern := filepath.FromSlash(strings.TrimSpace(member))
+		if memberPattern == "" || filepath.IsAbs(memberPattern) {
+			continue
+		}
+		matches, err := filepath.Glob(filepath.Join(rootDir, memberPattern, "Cargo.toml"))
+		if err != nil {
+			return nil, fmt.Errorf("expand workspace member %q: %w", member, err)
+		}
+		for _, memberPath := range matches {
+			relDir, err := filepath.Rel(rootDir, filepath.Dir(memberPath))
+			if err != nil || cargoMemberExcluded(relDir, excluded) {
+				continue
+			}
+			data, err := readManifestFile(memberPath)
+			if err != nil {
+				return nil, err
+			}
+			var memberManifest cargoManifest
+			if err := toml.Unmarshal(data, &memberManifest); err != nil {
+				return nil, fmt.Errorf("parse %s: %w", memberPath, err)
+			}
+			collectCargoInheritedDependencies(inherited, memberManifest.cargoDependencyTables)
+			for _, target := range memberManifest.Target {
+				collectCargoInheritedDependencies(inherited, target)
+			}
+		}
+	}
+
+	return inherited, nil
+}
+
+func cargoMemberExcluded(relDir string, excluded []string) bool {
+	for _, exclusion := range excluded {
+		if relDir == exclusion || strings.HasPrefix(relDir, exclusion+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectCargoInheritedDependencies(inherited map[string]struct{}, tables cargoDependencyTables) {
+	for _, table := range []map[string]any{
+		tables.Dependencies,
+		tables.DevDependencies,
+		tables.LegacyDevDependencies,
+		tables.BuildDependencies,
+		tables.LegacyBuildDependencies,
+	} {
+		for key, spec := range table {
+			if cargoInheritsWorkspace(spec) {
+				inherited[key] = struct{}{}
+			}
+		}
+	}
 }
 
 func parseCargoLock(path string) ([]dependencyRef, error) {

@@ -403,6 +403,62 @@ tokio = { version = "1", features = ["full"] }
 	}
 }
 
+func TestParseCargoTomlReportsOnlyInheritedWorkspaceDependencies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/ignored"]
+
+[workspace.dependencies]
+used-by-member = "1.2"
+used-by-target = "0.4"
+only-excluded = "3"
+unused = "2"
+`,
+		"crates/app/Cargo.toml": `
+[package]
+name = "app"
+
+[dependencies]
+used-by-member = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+used-by-target = { workspace = true }
+`,
+		"crates/ignored/Cargo.toml": `
+[dependencies]
+only-excluded = { workspace = true }
+`,
+	}
+	for name, data := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("create %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"used-by-member", "used-by-target"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+	if deps[0].VersionSpec != "1.2" {
+		t.Fatalf("expected workspace version spec, got %q", deps[0].VersionSpec)
+	}
+}
+
 func TestParseCargoLock(t *testing.T) {
 	t.Parallel()
 
