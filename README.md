@@ -8,6 +8,7 @@ Supported manifests:
 - Python/PyPI: `pyproject.toml`, `requirements.txt`
 - Go modules: `go.mod`
 - PHP/Composer: `composer.json`, `composer.lock`
+- Rust/Cargo: `Cargo.toml`, `Cargo.lock`
 
 When a project has `node_modules`, `package-checker` also scans installed npm package roots under `node_modules/<package>` and `node_modules/@scope/<package>`. It does not recursively walk nested dependency trees.
 
@@ -56,6 +57,8 @@ Both the candidate and installed binary must report the requested release versio
 The default feed uses Socket's public supply-chain attack package API. The scanner starts at campaign `16`, tolerates sparse campaign IDs before the known `/25/packages` feed, and stops after three consecutive `404 Not Found` responses once that range is covered.
 
 Socket campaign entries can include package versions. When an entry has a version, `package-checker` only reports a match when the manifest contains the same exact pinned version. Entries without a version match by package name.
+
+Composer and Cargo version constraints are the exception: a flagged version also matches when the declared requirement would allow it (for example `serde = "1.0"` in `Cargo.toml` allows `1.0.5`), because the package manager could resolve to that version. `Cargo.lock` gives the resolved versions and is the more precise source. Crate names match case-insensitively with `-` and `_` treated as equivalent, as on crates.io. Git dependencies and `workspace = true` dependencies with no version in the scanned `Cargo.toml` match any flagged version of the crate. Entries in `[workspace.dependencies]` are only checked when the root package or a workspace member inherits them (crates listed in `[workspace] members` plus in-tree path dependencies, as Cargo treats them), so unused declarations are not reported. Workspace members and `path` dependencies are local code and are not checked.
 
 Generally, this tool is intended to be used as a pre-release check to ensure that no known malicious packages are being used in your project.
 

@@ -14,6 +14,7 @@ const (
 	ecosystemPython ecosystem = "python"
 	ecosystemGo     ecosystem = "golang"
 	ecosystemPHP    ecosystem = "php"
+	ecosystemRust   ecosystem = "rust"
 )
 
 type feedEntry struct {

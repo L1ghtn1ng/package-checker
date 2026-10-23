@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -329,6 +330,399 @@ func TestParseComposerLock(t *testing.T) {
 	want := []string{"laravel-lang/lang@1.0.2", "pestphp/pest@3.8.4", "vendor/package@2.3.4"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func TestParseCargoToml(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cargo.toml")
+	data := `
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+pinned = "=0.4.2"
+renamed = { package = "real-crate", version = "^2.1" }
+from-git = { git = "https://example.com/from-git.git" }
+local = { path = "../local" }
+tokio = { workspace = true, features = ["rt"] }
+inherited-elsewhere = { workspace = true }
+
+[dev-dependencies]
+serde = "1.0"
+tempfile = { version = "3" }
+
+[build-dependencies]
+cc = "1.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+`
+
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
+	}
+
+	deps, err := parseCargoToml(path)
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"cc", "from-git", "inherited-elsewhere", "libc", "pinned", "real-crate", "serde", "tempfile", "tokio"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+
+	versions := dependencyVersions(deps)
+	if versions["pinned"] != "0.4.2" {
+		t.Fatalf("expected exact pinned version, got %q", versions["pinned"])
+	}
+	if versions["serde"] != "" {
+		t.Fatalf("expected caret requirement to have no exact version, got %q", versions["serde"])
+	}
+	wantSpecs := map[string]string{
+		"real-crate":          "^2.1",
+		"from-git":            "*",
+		"tokio":               "1",
+		"inherited-elsewhere": "*",
+	}
+	for _, dep := range deps {
+		if want, ok := wantSpecs[dep.Name]; ok && dep.VersionSpec != want {
+			t.Fatalf("unexpected version spec for %s: got %q want %q", dep.Name, dep.VersionSpec, want)
+		}
+		if dep.Ecosystem != ecosystemRust {
+			t.Fatalf("unexpected ecosystem for %s: %q", dep.Name, dep.Ecosystem)
+		}
+	}
+}
+
+func TestParseCargoTomlReportsOnlyInheritedWorkspaceDependencies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/*"]
+exclude = ["crates/ignored"]
+
+[workspace.dependencies]
+used-by-member = "1.2"
+used-by-target = "0.4"
+only-excluded = "3"
+unused = "2"
+`,
+		"crates/app/Cargo.toml": `
+[package]
+name = "app"
+
+[dependencies]
+used-by-member = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+used-by-target = { workspace = true }
+`,
+		"crates/ignored/Cargo.toml": `
+[dependencies]
+only-excluded = { workspace = true }
+`,
+	}
+	writeTestFiles(t, dir, files)
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"used-by-member", "used-by-target"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+	if deps[0].VersionSpec != "1.2" {
+		t.Fatalf("expected workspace version spec, got %q", deps[0].VersionSpec)
+	}
+}
+
+func TestParseCargoTomlFollowsImplicitPathMembers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[package]
+name = "root"
+
+[dependencies]
+helper = { path = "helper" }
+vendored = { path = "vendored" }
+
+[workspace]
+exclude = ["vendored"]
+
+[workspace.dependencies]
+from-path-member = "1"
+from-nested-member = "2"
+from-excluded = "3"
+unused = "4"
+`,
+		"helper/Cargo.toml": `
+[dependencies]
+from-path-member = { workspace = true }
+nested = { path = "../nested" }
+`,
+		"nested/Cargo.toml": `
+[dev-dependencies]
+from-nested-member = { workspace = true }
+`,
+		"vendored/Cargo.toml": `
+[dependencies]
+from-excluded = { workspace = true }
+`,
+	}
+	writeTestFiles(t, dir, files)
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"from-nested-member", "from-path-member"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func TestParseCargoTomlKeepsExplicitMembersThatAreAlsoExcluded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/app"]
+exclude = ["crates"]
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
+	}
+}
+
+func TestParseCargoTomlIgnoresCratesFromOtherWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[package]
+name = "root"
+
+[dependencies]
+claimed = { path = "claimed" }
+nested-root = { path = "nested-root" }
+linked = { path = "linked" }
+member = { path = "member" }
+
+[workspace]
+
+[workspace.dependencies]
+from-claimed = "1"
+from-nested-root = "1"
+from-linked = "1"
+from-member = "1"
+`,
+		"claimed/Cargo.toml": `
+[package]
+name = "claimed"
+workspace = "../other"
+
+[dependencies]
+from-claimed = { workspace = true }
+`,
+		"other/Cargo.toml": `
+[workspace]
+members = ["../claimed"]
+`,
+		"nested-root/Cargo.toml": `
+[package]
+name = "nested-root"
+
+[workspace]
+
+[dependencies]
+from-nested-root = { workspace = true }
+`,
+		"member/Cargo.toml": `
+[package]
+name = "member"
+workspace = ".."
+
+[dependencies]
+from-member = { workspace = true }
+`,
+	})
+	writeTestFiles(t, outside, map[string]string{
+		"Cargo.toml": `
+[dependencies]
+from-linked = { workspace = true }
+`,
+	})
+	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"from-member"}) {
+		t.Fatalf("unexpected deps: got %v want [from-member]", got)
+	}
+}
+
+func TestParseCargoTomlTreatsRootDirectoryNameLiterally(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "project[1")
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
+	}
+}
+
+func TestParseCargoTomlExpandsBackslashMemberPatternsOnWindows(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS != "windows" {
+		t.Skip("backslash is a glob escape, not a path separator, outside Windows")
+	}
+
+	dir := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ['crates\*']
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
+	}
+}
+
+func TestParseCargoLock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cargo.lock")
+	data := `
+version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+dependencies = ["serde"]
+
+[[package]]
+name = "serde"
+version = "1.0.210"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8e3592472072e6e22e0a54d5904d9febf8508f65fb8552499a1abc7d1078c3a"
+
+[[package]]
+name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "syn"
+version = "2.0.77"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "from-git"
+version = "0.3.0"
+source = "git+https://example.com/from-git.git#abc123"
+`
+
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write Cargo.lock: %v", err)
+	}
+
+	deps, err := parseCargoLock(path)
+	if err != nil {
+		t.Fatalf("parse Cargo.lock: %v", err)
+	}
+
+	got := dependencyNameVersions(deps)
+	want := []string{"from-git@0.3.0", "serde@1.0.210", "syn@1.0.109", "syn@2.0.77"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func writeTestFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+
+	for name, data := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("create %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 }
 

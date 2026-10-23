@@ -293,3 +293,168 @@ func TestScanDirectoryMatchesLockfileDependencies(t *testing.T) {
 		t.Fatalf("unexpected findings: got %v want %v", got, want)
 	}
 }
+
+func TestScanDirectoryMatchesCargoDependencies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[dependencies]
+sui_move_build_helper = "0.1"
+safe-crate = "2"
+`,
+		"Cargo.lock": `
+version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+
+[[package]]
+name = "sui_move_build_helper"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "safe-crate"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`,
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, []feedEntry{
+		{Name: "sui-move-build-helper", Version: "0.1.1", Type: "cargo"},
+		{Name: "safe-crate", Version: "1.0.0", Type: "cargo"},
+		{Name: "app", Version: "0.1.0", Type: "cargo"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 2 {
+		t.Fatalf("unexpected scanned files: got %d want 2", scannedFiles)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, filepath.Base(finding.Dependency.Source)+":"+finding.Dependency.Name+"@"+finding.Dependency.Version)
+	}
+	want := []string{
+		"Cargo.lock:sui_move_build_helper@0.1.1",
+		"Cargo.toml:sui_move_build_helper@",
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestCargoRequirementAllowsVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		spec    string
+		version string
+		want    bool
+	}{
+		{spec: "1.2.3", version: "1.9.0", want: true},
+		{spec: "1.2.3", version: "2.0.0", want: false},
+		{spec: "1.2.3", version: "1.2.2", want: false},
+		{spec: "0.2.3", version: "0.2.9", want: true},
+		{spec: "0.2.3", version: "0.3.0", want: false},
+		{spec: "0.0.3", version: "0.0.4", want: false},
+		{spec: "^0.0", version: "0.0.7", want: true},
+		{spec: "^0.0", version: "0.1.0", want: false},
+		{spec: "0", version: "0.9.0", want: true},
+		{spec: "~1.2.3", version: "1.2.9", want: true},
+		{spec: "~1.2.3", version: "1.3.0", want: false},
+		{spec: "~1", version: "1.9.0", want: true},
+		{spec: "=1.2.3", version: "1.2.3", want: true},
+		{spec: "=1.2.3", version: "1.2.4", want: false},
+		{spec: "=1.2", version: "1.2.8", want: true},
+		{spec: ">=1.0, <1.5", version: "1.4.9", want: true},
+		{spec: ">=1.0, <1.5", version: "1.5.0", want: false},
+		{spec: ">1.2", version: "1.2.9", want: false},
+		{spec: ">1.2", version: "1.3.0", want: true},
+		{spec: "<=1.2", version: "1.2.9", want: true},
+		{spec: "1.*", version: "1.8.0", want: true},
+		{spec: "1.2.*", version: "1.3.0", want: false},
+		{spec: "*", version: "4.0.0", want: true},
+		{spec: "1", version: "1.1.0-beta", want: false},
+		{spec: "1.1.0-beta", version: "1.1.0-beta", want: true},
+		{spec: ">=1.0.0-alpha.2", version: "1.0.0-alpha.10", want: true},
+		{spec: ">=1.0.0-alpha.10", version: "1.0.0-alpha.2", want: false},
+		{spec: "<1.0.0-alpha.10", version: "1.0.0-alpha.2", want: true},
+		{spec: "", version: "1.0.0", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.spec+"/"+tt.version, func(t *testing.T) {
+			t.Parallel()
+
+			got := cargoRequirementAllowsVersion(tt.spec, tt.version)
+			if got != tt.want {
+				t.Fatalf("cargoRequirementAllowsVersion(%q, %q) = %t, want %t", tt.spec, tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScanDirectoryMatchesUnversionedCargoDependenciesWithoutLockfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	manifest := `
+[dependencies]
+git-crate = { git = "https://example.com/git-crate.git" }
+inherited = { workspace = true }
+pinned-inherited = { workspace = true }
+
+[workspace.dependencies]
+pinned-inherited = "=2.0.0"
+`
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(manifest), 0o600); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
+	}
+
+	findings, _, err := scanDirectory(dir, []feedEntry{
+		{Name: "git-crate", Version: "0.3.1", Type: "cargo"},
+		{Name: "inherited", Version: "1.4.0", Type: "cargo"},
+		{Name: "pinned-inherited", Version: "2.0.1", Type: "cargo"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Dependency.Name)
+	}
+	want := []string{"git-crate", "inherited"}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestComparePrerelease(t *testing.T) {
+	t.Parallel()
+
+	ordered := []string{"alpha", "alpha.1", "alpha.beta", "beta", "beta.2", "beta.11", "rc.1"}
+	for i := range len(ordered) - 1 {
+		if got := comparePrerelease(ordered[i], ordered[i+1]); got != -1 {
+			t.Fatalf("comparePrerelease(%q, %q) = %d, want -1", ordered[i], ordered[i+1], got)
+		}
+		if got := comparePrerelease(ordered[i+1], ordered[i]); got != 1 {
+			t.Fatalf("comparePrerelease(%q, %q) = %d, want 1", ordered[i+1], ordered[i], got)
+		}
+	}
+	if got := comparePrerelease("rc.1", "rc.1"); got != 0 {
+		t.Fatalf("comparePrerelease(rc.1, rc.1) = %d, want 0", got)
+	}
+}

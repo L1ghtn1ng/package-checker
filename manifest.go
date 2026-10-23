@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -75,6 +77,39 @@ type poetryManifest struct {
 
 type poetryGroupManifest struct {
 	Dependencies map[string]any `toml:"dependencies"`
+}
+
+type cargoManifest struct {
+	cargoDependencyTables
+	Package struct {
+		Workspace string `toml:"workspace"`
+	} `toml:"package"`
+	Target    map[string]cargoDependencyTables `toml:"target"`
+	Workspace *cargoWorkspace                  `toml:"workspace"`
+}
+
+type cargoWorkspace struct {
+	Members      []string       `toml:"members"`
+	Exclude      []string       `toml:"exclude"`
+	Dependencies map[string]any `toml:"dependencies"`
+}
+
+type cargoDependencyTables struct {
+	Dependencies            map[string]any `toml:"dependencies"`
+	DevDependencies         map[string]any `toml:"dev-dependencies"`
+	LegacyDevDependencies   map[string]any `toml:"dev_dependencies"`
+	BuildDependencies       map[string]any `toml:"build-dependencies"`
+	LegacyBuildDependencies map[string]any `toml:"build_dependencies"`
+}
+
+type cargoLockManifest struct {
+	Packages []cargoLockPackage `toml:"package"`
+}
+
+type cargoLockPackage struct {
+	Name    string `toml:"name"`
+	Version string `toml:"version"`
+	Source  string `toml:"source"`
 }
 
 func parsePackageJSON(path string) ([]dependencyRef, error) {
@@ -445,6 +480,309 @@ func parseComposerLock(path string) ([]dependencyRef, error) {
 	return deps, nil
 }
 
+func parseCargoToml(path string) ([]dependencyRef, error) {
+	data, err := readManifestFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest cargoManifest
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	workspace := manifest.workspace()
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	addTable := func(table map[string]any) {
+		for key, spec := range table {
+			if inherited, ok := workspace.Dependencies[key]; ok && cargoInheritsWorkspace(spec) {
+				spec = inherited
+			}
+			dep, ok := cargoDependency(key, spec)
+			if !ok {
+				continue
+			}
+			seenKey := normalizeDependencyName(ecosystemRust, dep.Name) + "@" + dep.VersionSpec
+			if _, exists := seen[seenKey]; exists {
+				continue
+			}
+			seen[seenKey] = struct{}{}
+			dep.Source = path
+			deps = append(deps, dep)
+		}
+	}
+	for _, table := range manifest.dependencyTables() {
+		addTable(table)
+	}
+
+	// [workspace.dependencies] only declares crates for members to opt into, so
+	// report an entry only when a workspace member inherits it.
+	memberInherited, err := cargoMemberInheritedDependencies(filepath.Dir(path), manifest)
+	if err != nil {
+		return nil, err
+	}
+	for key, spec := range workspace.Dependencies {
+		if _, ok := memberInherited[key]; ok {
+			addTable(map[string]any{key: spec})
+		}
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.VersionSpec, b.VersionSpec)
+	})
+
+	return deps, nil
+}
+
+// cargoMemberInheritedDependencies returns the dependency keys that workspace
+// members inherit with workspace = true. Members are the crates listed in
+// [workspace] members plus, as in Cargo, every path dependency reachable from
+// the root or another member that lives inside the workspace directory.
+func cargoMemberInheritedDependencies(rootDir string, root cargoManifest) (map[string]struct{}, error) {
+	inherited := map[string]struct{}{}
+	workspace := root.workspace()
+	if len(workspace.Dependencies) == 0 {
+		return inherited, nil
+	}
+
+	canonicalRoot, err := canonicalDir(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root %s: %w", rootDir, err)
+	}
+	layout := cargoWorkspaceLayout{
+		root:    canonicalRoot,
+		members: cleanRelativePaths(workspace.Members),
+		exclude: cleanRelativePaths(workspace.Exclude),
+	}
+
+	queue := cargoPathDependencyDirs(canonicalRoot, root)
+	// Glob within the root directory so its own name is never read as a pattern.
+	rootFS := os.DirFS(canonicalRoot)
+	for _, member := range workspace.Members {
+		member = strings.TrimSpace(member)
+		if member == "" || filepath.IsAbs(member) {
+			continue
+		}
+		// io/fs patterns are slash-separated; on Windows a backslash in a member
+		// pattern is a directory separator rather than a glob escape.
+		pattern := filepath.ToSlash(member)
+		if path.IsAbs(pattern) {
+			continue
+		}
+		matches, err := fs.Glob(rootFS, path.Join(path.Clean(pattern), "Cargo.toml"))
+		if err != nil {
+			return nil, fmt.Errorf("expand workspace member %q: %w", member, err)
+		}
+		for _, match := range matches {
+			queue = append(queue, filepath.Join(canonicalRoot, filepath.FromSlash(path.Dir(match))))
+		}
+	}
+
+	visited := map[string]struct{}{canonicalRoot: {}}
+	for len(queue) > 0 {
+		candidate := queue[0]
+		queue = queue[1:]
+		// Resolve symlinks so a link inside the workspace cannot pull in an outside crate.
+		memberDir, err := canonicalDir(candidate)
+		if err != nil {
+			continue
+		}
+		if _, ok := visited[memberDir]; ok {
+			continue
+		}
+		visited[memberDir] = struct{}{}
+		if !layout.includes(memberDir) {
+			continue
+		}
+
+		memberPath := filepath.Join(memberDir, "Cargo.toml")
+		data, err := readManifestFile(memberPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		var memberManifest cargoManifest
+		if err := toml.Unmarshal(data, &memberManifest); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", memberPath, err)
+		}
+		if !layout.owns(memberDir, memberManifest) {
+			continue
+		}
+		for _, table := range memberManifest.dependencyTables() {
+			for key, spec := range table {
+				if cargoInheritsWorkspace(spec) {
+					inherited[key] = struct{}{}
+				}
+			}
+		}
+		queue = append(queue, cargoPathDependencyDirs(memberDir, memberManifest)...)
+	}
+
+	return inherited, nil
+}
+
+// cargoPathDependencyDirs returns the directories of a manifest's path dependencies.
+func cargoPathDependencyDirs(manifestDir string, manifest cargoManifest) []string {
+	dirs := make([]string, 0)
+	for _, table := range manifest.dependencyTables() {
+		for _, spec := range table {
+			fields, ok := spec.(map[string]any)
+			if !ok {
+				continue
+			}
+			depPath, ok := fields["path"].(string)
+			if !ok || strings.TrimSpace(depPath) == "" {
+				continue
+			}
+			dirs = append(dirs, resolveManifestPath(manifestDir, depPath))
+		}
+	}
+	return dirs
+}
+
+type cargoWorkspaceLayout struct {
+	root    string
+	members []string
+	exclude []string
+}
+
+// includes reports whether a canonical directory is inside the workspace and
+// not excluded. As in Cargo, a path under a literally listed member stays a
+// member even when it is also excluded.
+func (l cargoWorkspaceLayout) includes(dir string) bool {
+	relDir, err := filepath.Rel(l.root, dir)
+	if err != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) {
+		return false
+	}
+	for _, member := range l.members {
+		if hasPathPrefix(relDir, member) {
+			return true
+		}
+	}
+	for _, exclusion := range l.exclude {
+		if hasPathPrefix(relDir, exclusion) {
+			return false
+		}
+	}
+	return true
+}
+
+// owns reports whether a crate belongs to this workspace rather than one named
+// by its [package] workspace key or rooted at its own [workspace] table.
+func (l cargoWorkspaceLayout) owns(dir string, manifest cargoManifest) bool {
+	if workspacePath := strings.TrimSpace(manifest.Package.Workspace); workspacePath != "" {
+		target, err := canonicalDir(resolveManifestPath(dir, workspacePath))
+		return err == nil && target == l.root
+	}
+	return manifest.Workspace == nil
+}
+
+func (m cargoManifest) workspace() cargoWorkspace {
+	if m.Workspace == nil {
+		return cargoWorkspace{}
+	}
+	return *m.Workspace
+}
+
+func canonicalDir(dir string) (string, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
+}
+
+func resolveManifestPath(manifestDir, value string) string {
+	value = filepath.FromSlash(strings.TrimSpace(value))
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Join(manifestDir, value)
+}
+
+func cleanRelativePaths(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		cleaned = append(cleaned, filepath.Clean(filepath.FromSlash(value)))
+	}
+	return cleaned
+}
+
+func hasPathPrefix(relPath, prefix string) bool {
+	return prefix == "." || relPath == prefix || strings.HasPrefix(relPath, prefix+string(filepath.Separator))
+}
+
+func (m cargoManifest) dependencyTables() []map[string]any {
+	tables := m.list()
+	for _, target := range m.Target {
+		tables = append(tables, target.list()...)
+	}
+	return tables
+}
+
+func (t cargoDependencyTables) list() []map[string]any {
+	return []map[string]any{
+		t.Dependencies,
+		t.DevDependencies,
+		t.LegacyDevDependencies,
+		t.BuildDependencies,
+		t.LegacyBuildDependencies,
+	}
+}
+
+func parseCargoLock(path string) ([]dependencyRef, error) {
+	data, err := readManifestFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest cargoLockManifest
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	for _, pkg := range manifest.Packages {
+		name := strings.TrimSpace(pkg.Name)
+		// Packages without a source are workspace members or path dependencies.
+		if name == "" || strings.TrimSpace(pkg.Source) == "" {
+			continue
+		}
+		version := normalizeVersion(pkg.Version)
+		key := normalizeDependencyName(ecosystemRust, name) + "@" + version
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deps = append(deps, dependencyRef{
+			Name:      name,
+			Version:   version,
+			Source:    path,
+			Ecosystem: ecosystemRust,
+		})
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+
+	return deps, nil
+}
+
 func readManifestFile(path string) ([]byte, error) {
 	// Reading caller-selected manifest paths is the scanner's intended operation.
 	return os.ReadFile(path) //nolint:gosec
@@ -578,6 +916,57 @@ func poetryExactVersion(spec any) string {
 		return ""
 	}
 	return ""
+}
+
+// cargoDependency resolves a Cargo.toml dependency entry to the crate it pulls
+// from a registry or git source. Path-only dependencies are local code and skipped.
+func cargoDependency(key string, spec any) (dependencyRef, bool) {
+	name := strings.TrimSpace(key)
+	versionSpec := ""
+	switch value := spec.(type) {
+	case string:
+		versionSpec = strings.TrimSpace(value)
+	case map[string]any:
+		if _, ok := value["path"]; ok {
+			return dependencyRef{}, false
+		}
+		if pkg, ok := value["package"].(string); ok && strings.TrimSpace(pkg) != "" {
+			name = strings.TrimSpace(pkg)
+		}
+		if version, ok := value["version"].(string); ok {
+			versionSpec = strings.TrimSpace(version)
+		}
+	default:
+		return dependencyRef{}, false
+	}
+	if name == "" {
+		return dependencyRef{}, false
+	}
+	// Git and unresolved workspace = true dependencies have no declared version,
+	// so any flagged version of the crate could be in use.
+	if versionSpec == "" {
+		versionSpec = "*"
+	}
+
+	version := ""
+	if exact, ok := strings.CutPrefix(versionSpec, "="); ok {
+		version = extractExactVersion(exact)
+	}
+	return dependencyRef{
+		Name:        name,
+		Version:     version,
+		VersionSpec: versionSpec,
+		Ecosystem:   ecosystemRust,
+	}, true
+}
+
+func cargoInheritsWorkspace(spec any) bool {
+	table, ok := spec.(map[string]any)
+	if !ok {
+		return false
+	}
+	inherits, ok := table["workspace"].(bool)
+	return ok && inherits
 }
 
 func stripInlineComment(line string) string {
