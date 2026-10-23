@@ -434,15 +434,7 @@ used-by-target = { workspace = true }
 only-excluded = { workspace = true }
 `,
 	}
-	for name, data := range files {
-		path := filepath.Join(dir, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatalf("create %s: %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
+	writeTestFiles(t, dir, files)
 
 	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
 	if err != nil {
@@ -495,15 +487,7 @@ from-nested-member = { workspace = true }
 from-excluded = { workspace = true }
 `,
 	}
-	for name, data := range files {
-		path := filepath.Join(dir, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatalf("create %s: %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
+	writeTestFiles(t, dir, files)
 
 	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
 	if err != nil {
@@ -514,6 +498,134 @@ from-excluded = { workspace = true }
 	want := []string{"from-nested-member", "from-path-member"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func TestParseCargoTomlKeepsExplicitMembersThatAreAlsoExcluded(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/app"]
+exclude = ["crates"]
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
+	}
+}
+
+func TestParseCargoTomlIgnoresCratesFromOtherWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[package]
+name = "root"
+
+[dependencies]
+claimed = { path = "claimed" }
+nested-root = { path = "nested-root" }
+linked = { path = "linked" }
+member = { path = "member" }
+
+[workspace]
+
+[workspace.dependencies]
+from-claimed = "1"
+from-nested-root = "1"
+from-linked = "1"
+from-member = "1"
+`,
+		"claimed/Cargo.toml": `
+[package]
+name = "claimed"
+workspace = "../other"
+
+[dependencies]
+from-claimed = { workspace = true }
+`,
+		"other/Cargo.toml": `
+[workspace]
+members = ["../claimed"]
+`,
+		"nested-root/Cargo.toml": `
+[package]
+name = "nested-root"
+
+[workspace]
+
+[dependencies]
+from-nested-root = { workspace = true }
+`,
+		"member/Cargo.toml": `
+[package]
+name = "member"
+workspace = ".."
+
+[dependencies]
+from-member = { workspace = true }
+`,
+	})
+	writeTestFiles(t, outside, map[string]string{
+		"Cargo.toml": `
+[dependencies]
+from-linked = { workspace = true }
+`,
+	})
+	if err := os.Symlink(outside, filepath.Join(dir, "linked")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"from-member"}) {
+		t.Fatalf("unexpected deps: got %v want [from-member]", got)
+	}
+}
+
+func TestParseCargoTomlTreatsRootDirectoryNameLiterally(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "project[1")
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
 	}
 }
 
@@ -565,6 +677,20 @@ source = "git+https://example.com/from-git.git#abc123"
 	want := []string{"from-git@0.3.0", "serde@1.0.210", "syn@1.0.109", "syn@2.0.77"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
+func writeTestFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+
+	for name, data := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("create %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 }
 

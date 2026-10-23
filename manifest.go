@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -79,12 +81,17 @@ type poetryGroupManifest struct {
 
 type cargoManifest struct {
 	cargoDependencyTables
+	Package struct {
+		Workspace string `toml:"workspace"`
+	} `toml:"package"`
 	Target    map[string]cargoDependencyTables `toml:"target"`
-	Workspace struct {
-		Members      []string       `toml:"members"`
-		Exclude      []string       `toml:"exclude"`
-		Dependencies map[string]any `toml:"dependencies"`
-	} `toml:"workspace"`
+	Workspace *cargoWorkspace                  `toml:"workspace"`
+}
+
+type cargoWorkspace struct {
+	Members      []string       `toml:"members"`
+	Exclude      []string       `toml:"exclude"`
+	Dependencies map[string]any `toml:"dependencies"`
 }
 
 type cargoDependencyTables struct {
@@ -484,11 +491,12 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
+	workspace := manifest.workspace()
 	seen := map[string]struct{}{}
 	deps := make([]dependencyRef, 0)
 	addTable := func(table map[string]any) {
 		for key, spec := range table {
-			if inherited, ok := manifest.Workspace.Dependencies[key]; ok && cargoInheritsWorkspace(spec) {
+			if inherited, ok := workspace.Dependencies[key]; ok && cargoInheritsWorkspace(spec) {
 				spec = inherited
 			}
 			dep, ok := cargoDependency(key, spec)
@@ -514,7 +522,7 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 	if err != nil {
 		return nil, err
 	}
-	for key, spec := range manifest.Workspace.Dependencies {
+	for key, spec := range workspace.Dependencies {
 		if _, ok := memberInherited[key]; ok {
 			addTable(map[string]any{key: spec})
 		}
@@ -535,39 +543,53 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 // [workspace] members plus, as in Cargo, every path dependency reachable from
 // the root or another member that lives inside the workspace directory.
 func cargoMemberInheritedDependencies(rootDir string, root cargoManifest) (map[string]struct{}, error) {
-	rootDir = filepath.Clean(rootDir)
 	inherited := map[string]struct{}{}
-	excluded := make([]string, 0, len(root.Workspace.Exclude))
-	for _, pattern := range root.Workspace.Exclude {
-		excluded = append(excluded, filepath.Clean(filepath.FromSlash(pattern)))
+	workspace := root.workspace()
+	if len(workspace.Dependencies) == 0 {
+		return inherited, nil
 	}
 
-	queue := cargoPathDependencyDirs(rootDir, root)
-	for _, member := range root.Workspace.Members {
-		memberPattern := filepath.FromSlash(strings.TrimSpace(member))
-		if memberPattern == "" || filepath.IsAbs(memberPattern) {
+	canonicalRoot, err := canonicalDir(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root %s: %w", rootDir, err)
+	}
+	layout := cargoWorkspaceLayout{
+		root:    canonicalRoot,
+		members: cleanRelativePaths(workspace.Members),
+		exclude: cleanRelativePaths(workspace.Exclude),
+	}
+
+	queue := cargoPathDependencyDirs(canonicalRoot, root)
+	// Glob within the root directory so its own name is never read as a pattern.
+	rootFS := os.DirFS(canonicalRoot)
+	for _, member := range workspace.Members {
+		member = strings.TrimSpace(member)
+		if member == "" || path.IsAbs(member) {
 			continue
 		}
-		matches, err := filepath.Glob(filepath.Join(rootDir, memberPattern, "Cargo.toml"))
+		matches, err := fs.Glob(rootFS, path.Join(path.Clean(member), "Cargo.toml"))
 		if err != nil {
 			return nil, fmt.Errorf("expand workspace member %q: %w", member, err)
 		}
-		for _, memberPath := range matches {
-			queue = append(queue, filepath.Dir(memberPath))
+		for _, match := range matches {
+			queue = append(queue, filepath.Join(canonicalRoot, filepath.FromSlash(path.Dir(match))))
 		}
 	}
 
-	visited := map[string]struct{}{rootDir: {}}
+	visited := map[string]struct{}{canonicalRoot: {}}
 	for len(queue) > 0 {
-		memberDir := filepath.Clean(queue[0])
+		candidate := queue[0]
 		queue = queue[1:]
+		// Resolve symlinks so a link inside the workspace cannot pull in an outside crate.
+		memberDir, err := canonicalDir(candidate)
+		if err != nil {
+			continue
+		}
 		if _, ok := visited[memberDir]; ok {
 			continue
 		}
 		visited[memberDir] = struct{}{}
-
-		relDir, err := filepath.Rel(rootDir, memberDir)
-		if err != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) || cargoMemberExcluded(relDir, excluded) {
+		if !layout.includes(memberDir) {
 			continue
 		}
 
@@ -582,6 +604,9 @@ func cargoMemberInheritedDependencies(rootDir string, root cargoManifest) (map[s
 		var memberManifest cargoManifest
 		if err := toml.Unmarshal(data, &memberManifest); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", memberPath, err)
+		}
+		if !layout.owns(memberDir, memberManifest) {
+			continue
 		}
 		for _, table := range memberManifest.dependencyTables() {
 			for key, spec := range table {
@@ -609,23 +634,86 @@ func cargoPathDependencyDirs(manifestDir string, manifest cargoManifest) []strin
 			if !ok || strings.TrimSpace(depPath) == "" {
 				continue
 			}
-			depPath = filepath.FromSlash(strings.TrimSpace(depPath))
-			if !filepath.IsAbs(depPath) {
-				depPath = filepath.Join(manifestDir, depPath)
-			}
-			dirs = append(dirs, depPath)
+			dirs = append(dirs, resolveManifestPath(manifestDir, depPath))
 		}
 	}
 	return dirs
 }
 
-func cargoMemberExcluded(relDir string, excluded []string) bool {
-	for _, exclusion := range excluded {
-		if relDir == exclusion || strings.HasPrefix(relDir, exclusion+string(filepath.Separator)) {
+type cargoWorkspaceLayout struct {
+	root    string
+	members []string
+	exclude []string
+}
+
+// includes reports whether a canonical directory is inside the workspace and
+// not excluded. As in Cargo, a path under a literally listed member stays a
+// member even when it is also excluded.
+func (l cargoWorkspaceLayout) includes(dir string) bool {
+	relDir, err := filepath.Rel(l.root, dir)
+	if err != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) {
+		return false
+	}
+	for _, member := range l.members {
+		if hasPathPrefix(relDir, member) {
 			return true
 		}
 	}
-	return false
+	for _, exclusion := range l.exclude {
+		if hasPathPrefix(relDir, exclusion) {
+			return false
+		}
+	}
+	return true
+}
+
+// owns reports whether a crate belongs to this workspace rather than one named
+// by its [package] workspace key or rooted at its own [workspace] table.
+func (l cargoWorkspaceLayout) owns(dir string, manifest cargoManifest) bool {
+	if workspacePath := strings.TrimSpace(manifest.Package.Workspace); workspacePath != "" {
+		target, err := canonicalDir(resolveManifestPath(dir, workspacePath))
+		return err == nil && target == l.root
+	}
+	return manifest.Workspace == nil
+}
+
+func (m cargoManifest) workspace() cargoWorkspace {
+	if m.Workspace == nil {
+		return cargoWorkspace{}
+	}
+	return *m.Workspace
+}
+
+func canonicalDir(dir string) (string, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
+}
+
+func resolveManifestPath(manifestDir, value string) string {
+	value = filepath.FromSlash(strings.TrimSpace(value))
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Join(manifestDir, value)
+}
+
+func cleanRelativePaths(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		cleaned = append(cleaned, filepath.Clean(filepath.FromSlash(value)))
+	}
+	return cleaned
+}
+
+func hasPathPrefix(relPath, prefix string) bool {
+	return prefix == "." || relPath == prefix || strings.HasPrefix(relPath, prefix+string(filepath.Separator))
 }
 
 func (m cargoManifest) dependencyTables() []map[string]any {
