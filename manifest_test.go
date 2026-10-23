@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -610,6 +611,37 @@ func TestParseCargoTomlTreatsRootDirectoryNameLiterally(t *testing.T) {
 		"Cargo.toml": `
 [workspace]
 members = ["crates/*"]
+
+[workspace.dependencies]
+flagged = "1"
+`,
+		"crates/app/Cargo.toml": `
+[dependencies]
+flagged = { workspace = true }
+`,
+	})
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+	if got := dependencyNames(deps); !slices.Equal(got, []string{"flagged"}) {
+		t.Fatalf("unexpected deps: got %v want [flagged]", got)
+	}
+}
+
+func TestParseCargoTomlExpandsBackslashMemberPatternsOnWindows(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS != "windows" {
+		t.Skip("backslash is a glob escape, not a path separator, outside Windows")
+	}
+
+	dir := t.TempDir()
+	writeTestFiles(t, dir, map[string]string{
+		"Cargo.toml": `
+[workspace]
+members = ['crates\*']
 
 [workspace.dependencies]
 flagged = "1"
