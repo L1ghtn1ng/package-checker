@@ -564,16 +564,10 @@ func cargoMemberInheritedDependencies(rootDir string, root cargoManifest) (map[s
 	rootFS := os.DirFS(canonicalRoot)
 	for _, member := range workspace.Members {
 		member = strings.TrimSpace(member)
-		if member == "" || filepath.IsAbs(member) {
+		if member == "" || path.IsAbs(member) {
 			continue
 		}
-		// io/fs patterns are slash-separated; on Windows a backslash in a member
-		// pattern is a directory separator rather than a glob escape.
-		pattern := filepath.ToSlash(member)
-		if path.IsAbs(pattern) {
-			continue
-		}
-		matches, err := fs.Glob(rootFS, path.Join(path.Clean(pattern), "Cargo.toml"))
+		matches, err := fs.Glob(rootFS, path.Join(path.Clean(member), "Cargo.toml"))
 		if err != nil {
 			return nil, fmt.Errorf("expand workspace member %q: %w", member, err)
 		}
