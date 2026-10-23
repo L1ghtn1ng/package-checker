@@ -348,6 +348,8 @@ pinned = "=0.4.2"
 renamed = { package = "real-crate", version = "^2.1" }
 from-git = { git = "https://example.com/from-git.git" }
 local = { path = "../local" }
+tokio = { workspace = true, features = ["rt"] }
+inherited-elsewhere = { workspace = true }
 
 [dev-dependencies]
 serde = "1.0"
@@ -373,7 +375,7 @@ tokio = { version = "1", features = ["full"] }
 	}
 
 	got := dependencyNames(deps)
-	want := []string{"cc", "from-git", "libc", "pinned", "real-crate", "serde", "tempfile", "tokio"}
+	want := []string{"cc", "from-git", "inherited-elsewhere", "libc", "pinned", "real-crate", "serde", "tempfile", "tokio"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected deps: got %v want %v", got, want)
 	}
@@ -385,9 +387,15 @@ tokio = { version = "1", features = ["full"] }
 	if versions["serde"] != "" {
 		t.Fatalf("expected caret requirement to have no exact version, got %q", versions["serde"])
 	}
+	wantSpecs := map[string]string{
+		"real-crate":          "^2.1",
+		"from-git":            "*",
+		"tokio":               "1",
+		"inherited-elsewhere": "*",
+	}
 	for _, dep := range deps {
-		if dep.Name == "real-crate" && dep.VersionSpec != "^2.1" {
-			t.Fatalf("unexpected renamed dependency spec: %q", dep.VersionSpec)
+		if want, ok := wantSpecs[dep.Name]; ok && dep.VersionSpec != want {
+			t.Fatalf("unexpected version spec for %s: got %q want %q", dep.Name, dep.VersionSpec, want)
 		}
 		if dep.Ecosystem != ecosystemRust {
 			t.Fatalf("unexpected ecosystem for %s: %q", dep.Name, dep.Ecosystem)

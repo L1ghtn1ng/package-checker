@@ -486,6 +486,9 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 	deps := make([]dependencyRef, 0)
 	addTable := func(table map[string]any) {
 		for key, spec := range table {
+			if inherited, ok := manifest.Workspace.Dependencies[key]; ok && cargoInheritsWorkspace(spec) {
+				spec = inherited
+			}
 			dep, ok := cargoDependency(key, spec)
 			if !ok {
 				continue
@@ -725,6 +728,11 @@ func cargoDependency(key string, spec any) (dependencyRef, bool) {
 	if name == "" {
 		return dependencyRef{}, false
 	}
+	// Git and unresolved workspace = true dependencies have no declared version,
+	// so any flagged version of the crate could be in use.
+	if versionSpec == "" {
+		versionSpec = "*"
+	}
 
 	version := ""
 	if exact, ok := strings.CutPrefix(versionSpec, "="); ok {
@@ -736,6 +744,15 @@ func cargoDependency(key string, spec any) (dependencyRef, bool) {
 		VersionSpec: versionSpec,
 		Ecosystem:   ecosystemRust,
 	}, true
+}
+
+func cargoInheritsWorkspace(spec any) bool {
+	table, ok := spec.(map[string]any)
+	if !ok {
+		return false
+	}
+	inherits, ok := table["workspace"].(bool)
+	return ok && inherits
 }
 
 func stripInlineComment(line string) string {

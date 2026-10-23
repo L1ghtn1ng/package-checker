@@ -387,6 +387,9 @@ func TestCargoRequirementAllowsVersion(t *testing.T) {
 		{spec: "*", version: "4.0.0", want: true},
 		{spec: "1", version: "1.1.0-beta", want: false},
 		{spec: "1.1.0-beta", version: "1.1.0-beta", want: true},
+		{spec: ">=1.0.0-alpha.2", version: "1.0.0-alpha.10", want: true},
+		{spec: ">=1.0.0-alpha.10", version: "1.0.0-alpha.2", want: false},
+		{spec: "<1.0.0-alpha.10", version: "1.0.0-alpha.2", want: true},
 		{spec: "", version: "1.0.0", want: false},
 	}
 
@@ -399,5 +402,59 @@ func TestCargoRequirementAllowsVersion(t *testing.T) {
 				t.Fatalf("cargoRequirementAllowsVersion(%q, %q) = %t, want %t", tt.spec, tt.version, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestScanDirectoryMatchesUnversionedCargoDependenciesWithoutLockfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	manifest := `
+[dependencies]
+git-crate = { git = "https://example.com/git-crate.git" }
+inherited = { workspace = true }
+pinned-inherited = { workspace = true }
+
+[workspace.dependencies]
+pinned-inherited = "=2.0.0"
+`
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(manifest), 0o600); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
+	}
+
+	findings, _, err := scanDirectory(dir, []feedEntry{
+		{Name: "git-crate", Version: "0.3.1", Type: "cargo"},
+		{Name: "inherited", Version: "1.4.0", Type: "cargo"},
+		{Name: "pinned-inherited", Version: "2.0.1", Type: "cargo"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, finding.Dependency.Name)
+	}
+	want := []string{"git-crate", "inherited"}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestComparePrerelease(t *testing.T) {
+	t.Parallel()
+
+	ordered := []string{"alpha", "alpha.1", "alpha.beta", "beta", "beta.2", "beta.11", "rc.1"}
+	for i := range len(ordered) - 1 {
+		if got := comparePrerelease(ordered[i], ordered[i+1]); got != -1 {
+			t.Fatalf("comparePrerelease(%q, %q) = %d, want -1", ordered[i], ordered[i+1], got)
+		}
+		if got := comparePrerelease(ordered[i+1], ordered[i]); got != 1 {
+			t.Fatalf("comparePrerelease(%q, %q) = %d, want 1", ordered[i+1], ordered[i], got)
+		}
+	}
+	if got := comparePrerelease("rc.1", "rc.1"); got != 0 {
+		t.Fatalf("comparePrerelease(rc.1, rc.1) = %d, want 0", got)
 	}
 }

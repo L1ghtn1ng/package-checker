@@ -574,8 +574,52 @@ func compareParsedVersions(a, b versionParts) int {
 	case b.prerelease == "":
 		return -1
 	default:
-		return strings.Compare(a.prerelease, b.prerelease)
+		return comparePrerelease(a.prerelease, b.prerelease)
 	}
+}
+
+// comparePrerelease orders pre-release strings by SemVer precedence: dot-separated
+// identifiers compare numerically when both are numeric, numeric identifiers sort
+// before alphanumeric ones, and a shorter identifier list sorts first.
+func comparePrerelease(a, b string) int {
+	left := strings.Split(a, ".")
+	right := strings.Split(b, ".")
+	for i := range min(len(left), len(right)) {
+		if cmp := comparePrereleaseIdentifier(left[i], right[i]); cmp != 0 {
+			return cmp
+		}
+	}
+	return compareInts(len(left), len(right))
+}
+
+func comparePrereleaseIdentifier(a, b string) int {
+	aNumeric, bNumeric := isNumericIdentifier(a), isNumericIdentifier(b)
+	switch {
+	case aNumeric && bNumeric:
+		a, b = strings.TrimLeft(a, "0"), strings.TrimLeft(b, "0")
+		if len(a) != len(b) {
+			return compareInts(len(a), len(b))
+		}
+		return strings.Compare(a, b)
+	case aNumeric:
+		return -1
+	case bNumeric:
+		return 1
+	default:
+		return strings.Compare(a, b)
+	}
+}
+
+func isNumericIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func compareInts(a, b int) int {
