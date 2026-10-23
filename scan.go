@@ -21,6 +21,8 @@ func scanDirectory(dir string, entries []feedEntry) ([]finding, int, error) {
 		{filename: "go.mod", parser: parseGoMod},
 		{filename: "composer.json", parser: parseComposerJSON},
 		{filename: "composer.lock", parser: parseComposerLock},
+		{filename: "Cargo.toml", parser: parseCargoToml},
+		{filename: "Cargo.lock", parser: parseCargoLock},
 	}
 
 	index := buildFeedIndex(entries)
@@ -266,6 +268,8 @@ func mapFeedPlatform(platform string) ecosystem {
 		return ecosystemGo
 	case "php", "composer", "packagist":
 		return ecosystemPHP
+	case "cargo", "crates", "crates.io", "crates-io", "rust":
+		return ecosystemRust
 	default:
 		return ""
 	}
@@ -301,7 +305,7 @@ func feedPackageName(entry feedEntry, kind ecosystem) string {
 			return name
 		}
 		return strings.TrimRight(namespace, "/") + "/" + name
-	case ecosystemPython:
+	case ecosystemPython, ecosystemRust:
 		return name
 	default:
 		return name
@@ -334,6 +338,8 @@ func dependencyVersionMatches(dep dependencyRef, feedVersion string) bool {
 	switch dep.Ecosystem {
 	case ecosystemPHP:
 		return composerConstraintAllowsVersion(dep.VersionSpec, feedVersion)
+	case ecosystemRust:
+		return cargoRequirementAllowsVersion(dep.VersionSpec, feedVersion)
 	case ecosystemNPM, ecosystemPython, ecosystemGo:
 		return false
 	default:
@@ -423,6 +429,124 @@ func tildeConstraintAllowsVersion(base, version string) bool {
 	return compareParsedVersions(parseVersionParts(version), lower) >= 0 && compareParsedVersions(parseVersionParts(version), upper) < 0
 }
 
+// cargoRequirementAllowsVersion reports whether a Cargo version requirement
+// such as "1.2", "^0.3", "~1.4.2", ">=1, <2" or "1.*" accepts version.
+func cargoRequirementAllowsVersion(spec, version string) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return false
+	}
+	target := parseVersionParts(version)
+	prereleaseAllowed := target.prerelease == ""
+	for comparator := range strings.SplitSeq(spec, ",") {
+		comparator = strings.TrimSpace(comparator)
+		if comparator == "" {
+			continue
+		}
+		allowed, base := cargoComparatorAllowsVersion(comparator, target)
+		if !allowed {
+			return false
+		}
+		// Cargo only selects a pre-release when a comparator names a
+		// pre-release of the same major.minor.patch.
+		if base.prerelease != "" && base.major == target.major && base.minor == target.minor && base.patch == target.patch {
+			prereleaseAllowed = true
+		}
+	}
+	return prereleaseAllowed
+}
+
+func cargoComparatorAllowsVersion(comparator string, version versionParts) (bool, versionParts) {
+	op := ""
+	for _, candidate := range []string{">=", "<=", ">", "<", "=", "^", "~"} {
+		if rest, ok := strings.CutPrefix(comparator, candidate); ok {
+			op = candidate
+			comparator = strings.TrimSpace(rest)
+			break
+		}
+	}
+
+	base, wildcard := cargoPartialVersion(comparator)
+	if wildcard && op == "" {
+		op = "="
+	}
+	if base.segments == 0 {
+		return op != "<" && op != ">", base
+	}
+
+	atLeastBase := compareParsedVersions(version, base) >= 0
+	switch op {
+	case "=":
+		if base.segments == 3 {
+			return compareParsedVersions(version, base) == 0, base
+		}
+		return atLeastBase && compareParsedVersions(version, bumpVersionAt(base, base.segments)) < 0, base
+	case ">":
+		if base.segments == 3 {
+			return compareParsedVersions(version, base) > 0, base
+		}
+		return compareParsedVersions(version, bumpVersionAt(base, base.segments)) >= 0, base
+	case ">=":
+		return atLeastBase, base
+	case "<":
+		return compareParsedVersions(version, base) < 0, base
+	case "<=":
+		if base.segments == 3 {
+			return compareParsedVersions(version, base) <= 0, base
+		}
+		return compareParsedVersions(version, bumpVersionAt(base, base.segments)) < 0, base
+	case "~":
+		return atLeastBase && compareParsedVersions(version, bumpVersionAt(base, min(base.segments, 2))) < 0, base
+	default:
+		var upper versionParts
+		switch {
+		case base.major > 0 || base.segments == 1:
+			upper = bumpVersionAt(base, 1)
+		case base.minor > 0 || base.segments == 2:
+			upper = bumpVersionAt(base, 2)
+		default:
+			upper = bumpVersionAt(base, 3)
+		}
+		return atLeastBase && compareParsedVersions(version, upper) < 0, base
+	}
+}
+
+// cargoPartialVersion parses a possibly partial or wildcard version such as
+// "1", "1.2", "1.2.*" or "*", recording how many concrete segments it has.
+func cargoPartialVersion(value string) (versionParts, bool) {
+	fields := strings.Split(value, ".")
+	concrete := 0
+	wildcard := false
+	for _, field := range fields {
+		if field == "*" || field == "x" || field == "X" {
+			wildcard = true
+			break
+		}
+		concrete++
+	}
+	parts := parseVersionParts(strings.Join(fields[:concrete], "."))
+	parts.segments = min(concrete, 3)
+	return parts, wildcard
+}
+
+// bumpVersionAt returns the smallest release above every version sharing the
+// first segment fields of base (1 = major, 2 = minor, 3 = patch).
+func bumpVersionAt(base versionParts, segment int) versionParts {
+	upper := versionParts{major: base.major, minor: base.minor, patch: base.patch, segments: 3}
+	switch segment {
+	case 1:
+		upper.major++
+		upper.minor = 0
+		upper.patch = 0
+	case 2:
+		upper.minor++
+		upper.patch = 0
+	default:
+		upper.patch++
+	}
+	return upper
+}
+
 type versionParts struct {
 	major      int
 	minor      int
@@ -505,6 +629,9 @@ func normalizeDependencyName(kind ecosystem, name string) string {
 	switch kind {
 	case ecosystemNPM, ecosystemGo, ecosystemPHP:
 		return strings.ToLower(name)
+	case ecosystemRust:
+		// crates.io treats names case-insensitively and "-" and "_" as equivalent.
+		return strings.ReplaceAll(strings.ToLower(name), "_", "-")
 	case ecosystemPython:
 		name = strings.ToLower(name)
 		replacer := strings.NewReplacer("_", "-", ".", "-")

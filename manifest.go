@@ -77,6 +77,32 @@ type poetryGroupManifest struct {
 	Dependencies map[string]any `toml:"dependencies"`
 }
 
+type cargoManifest struct {
+	cargoDependencyTables
+	Target    map[string]cargoDependencyTables `toml:"target"`
+	Workspace struct {
+		Dependencies map[string]any `toml:"dependencies"`
+	} `toml:"workspace"`
+}
+
+type cargoDependencyTables struct {
+	Dependencies            map[string]any `toml:"dependencies"`
+	DevDependencies         map[string]any `toml:"dev-dependencies"`
+	LegacyDevDependencies   map[string]any `toml:"dev_dependencies"`
+	BuildDependencies       map[string]any `toml:"build-dependencies"`
+	LegacyBuildDependencies map[string]any `toml:"build_dependencies"`
+}
+
+type cargoLockManifest struct {
+	Packages []cargoLockPackage `toml:"package"`
+}
+
+type cargoLockPackage struct {
+	Name    string `toml:"name"`
+	Version string `toml:"version"`
+	Source  string `toml:"source"`
+}
+
 func parsePackageJSON(path string) ([]dependencyRef, error) {
 	data, err := readManifestFile(path)
 	if err != nil {
@@ -445,6 +471,101 @@ func parseComposerLock(path string) ([]dependencyRef, error) {
 	return deps, nil
 }
 
+func parseCargoToml(path string) ([]dependencyRef, error) {
+	data, err := readManifestFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest cargoManifest
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	addTable := func(table map[string]any) {
+		for key, spec := range table {
+			dep, ok := cargoDependency(key, spec)
+			if !ok {
+				continue
+			}
+			seenKey := normalizeDependencyName(ecosystemRust, dep.Name) + "@" + dep.VersionSpec
+			if _, exists := seen[seenKey]; exists {
+				continue
+			}
+			seen[seenKey] = struct{}{}
+			dep.Source = path
+			deps = append(deps, dep)
+		}
+	}
+	addTables := func(tables cargoDependencyTables) {
+		addTable(tables.Dependencies)
+		addTable(tables.DevDependencies)
+		addTable(tables.LegacyDevDependencies)
+		addTable(tables.BuildDependencies)
+		addTable(tables.LegacyBuildDependencies)
+	}
+
+	addTables(manifest.cargoDependencyTables)
+	for _, target := range manifest.Target {
+		addTables(target)
+	}
+	addTable(manifest.Workspace.Dependencies)
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.VersionSpec, b.VersionSpec)
+	})
+
+	return deps, nil
+}
+
+func parseCargoLock(path string) ([]dependencyRef, error) {
+	data, err := readManifestFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest cargoLockManifest
+	if err := toml.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	seen := map[string]struct{}{}
+	deps := make([]dependencyRef, 0)
+	for _, pkg := range manifest.Packages {
+		name := strings.TrimSpace(pkg.Name)
+		// Packages without a source are workspace members or path dependencies.
+		if name == "" || strings.TrimSpace(pkg.Source) == "" {
+			continue
+		}
+		version := normalizeVersion(pkg.Version)
+		key := normalizeDependencyName(ecosystemRust, name) + "@" + version
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deps = append(deps, dependencyRef{
+			Name:      name,
+			Version:   version,
+			Source:    path,
+			Ecosystem: ecosystemRust,
+		})
+	}
+
+	slices.SortFunc(deps, func(a, b dependencyRef) int {
+		if cmp := strings.Compare(a.Name, b.Name); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+
+	return deps, nil
+}
+
 func readManifestFile(path string) ([]byte, error) {
 	// Reading caller-selected manifest paths is the scanner's intended operation.
 	return os.ReadFile(path) //nolint:gosec
@@ -578,6 +699,43 @@ func poetryExactVersion(spec any) string {
 		return ""
 	}
 	return ""
+}
+
+// cargoDependency resolves a Cargo.toml dependency entry to the crate it pulls
+// from a registry or git source. Path-only dependencies are local code and skipped.
+func cargoDependency(key string, spec any) (dependencyRef, bool) {
+	name := strings.TrimSpace(key)
+	versionSpec := ""
+	switch value := spec.(type) {
+	case string:
+		versionSpec = strings.TrimSpace(value)
+	case map[string]any:
+		if _, ok := value["path"]; ok {
+			return dependencyRef{}, false
+		}
+		if pkg, ok := value["package"].(string); ok && strings.TrimSpace(pkg) != "" {
+			name = strings.TrimSpace(pkg)
+		}
+		if version, ok := value["version"].(string); ok {
+			versionSpec = strings.TrimSpace(version)
+		}
+	default:
+		return dependencyRef{}, false
+	}
+	if name == "" {
+		return dependencyRef{}, false
+	}
+
+	version := ""
+	if exact, ok := strings.CutPrefix(versionSpec, "="); ok {
+		version = extractExactVersion(exact)
+	}
+	return dependencyRef{
+		Name:        name,
+		Version:     version,
+		VersionSpec: versionSpec,
+		Ecosystem:   ecosystemRust,
+	}, true
 }
 
 func stripInlineComment(line string) string {

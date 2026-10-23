@@ -293,3 +293,111 @@ func TestScanDirectoryMatchesLockfileDependencies(t *testing.T) {
 		t.Fatalf("unexpected findings: got %v want %v", got, want)
 	}
 }
+
+func TestScanDirectoryMatchesCargoDependencies(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[dependencies]
+sui_move_build_helper = "0.1"
+safe-crate = "2"
+`,
+		"Cargo.lock": `
+version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+
+[[package]]
+name = "sui_move_build_helper"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "safe-crate"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`,
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	findings, scannedFiles, err := scanDirectory(dir, []feedEntry{
+		{Name: "sui-move-build-helper", Version: "0.1.1", Type: "cargo"},
+		{Name: "safe-crate", Version: "1.0.0", Type: "cargo"},
+		{Name: "app", Version: "0.1.0", Type: "cargo"},
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if scannedFiles != 2 {
+		t.Fatalf("unexpected scanned files: got %d want 2", scannedFiles)
+	}
+
+	got := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		got = append(got, filepath.Base(finding.Dependency.Source)+":"+finding.Dependency.Name+"@"+finding.Dependency.Version)
+	}
+	want := []string{
+		"Cargo.lock:sui_move_build_helper@0.1.1",
+		"Cargo.toml:sui_move_build_helper@",
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected findings: got %v want %v", got, want)
+	}
+}
+
+func TestCargoRequirementAllowsVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		spec    string
+		version string
+		want    bool
+	}{
+		{spec: "1.2.3", version: "1.9.0", want: true},
+		{spec: "1.2.3", version: "2.0.0", want: false},
+		{spec: "1.2.3", version: "1.2.2", want: false},
+		{spec: "0.2.3", version: "0.2.9", want: true},
+		{spec: "0.2.3", version: "0.3.0", want: false},
+		{spec: "0.0.3", version: "0.0.4", want: false},
+		{spec: "^0.0", version: "0.0.7", want: true},
+		{spec: "^0.0", version: "0.1.0", want: false},
+		{spec: "0", version: "0.9.0", want: true},
+		{spec: "~1.2.3", version: "1.2.9", want: true},
+		{spec: "~1.2.3", version: "1.3.0", want: false},
+		{spec: "~1", version: "1.9.0", want: true},
+		{spec: "=1.2.3", version: "1.2.3", want: true},
+		{spec: "=1.2.3", version: "1.2.4", want: false},
+		{spec: "=1.2", version: "1.2.8", want: true},
+		{spec: ">=1.0, <1.5", version: "1.4.9", want: true},
+		{spec: ">=1.0, <1.5", version: "1.5.0", want: false},
+		{spec: ">1.2", version: "1.2.9", want: false},
+		{spec: ">1.2", version: "1.3.0", want: true},
+		{spec: "<=1.2", version: "1.2.9", want: true},
+		{spec: "1.*", version: "1.8.0", want: true},
+		{spec: "1.2.*", version: "1.3.0", want: false},
+		{spec: "*", version: "4.0.0", want: true},
+		{spec: "1", version: "1.1.0-beta", want: false},
+		{spec: "1.1.0-beta", version: "1.1.0-beta", want: true},
+		{spec: "", version: "1.0.0", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.spec+"/"+tt.version, func(t *testing.T) {
+			t.Parallel()
+
+			got := cargoRequirementAllowsVersion(tt.spec, tt.version)
+			if got != tt.want {
+				t.Fatalf("cargoRequirementAllowsVersion(%q, %q) = %t, want %t", tt.spec, tt.version, got, tt.want)
+			}
+		})
+	}
+}

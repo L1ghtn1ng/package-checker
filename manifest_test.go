@@ -332,6 +332,120 @@ func TestParseComposerLock(t *testing.T) {
 	}
 }
 
+func TestParseCargoToml(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cargo.toml")
+	data := `
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+pinned = "=0.4.2"
+renamed = { package = "real-crate", version = "^2.1" }
+from-git = { git = "https://example.com/from-git.git" }
+local = { path = "../local" }
+
+[dev-dependencies]
+serde = "1.0"
+tempfile = { version = "3" }
+
+[build-dependencies]
+cc = "1.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+`
+
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
+	}
+
+	deps, err := parseCargoToml(path)
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"cc", "from-git", "libc", "pinned", "real-crate", "serde", "tempfile", "tokio"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+
+	versions := dependencyVersions(deps)
+	if versions["pinned"] != "0.4.2" {
+		t.Fatalf("expected exact pinned version, got %q", versions["pinned"])
+	}
+	if versions["serde"] != "" {
+		t.Fatalf("expected caret requirement to have no exact version, got %q", versions["serde"])
+	}
+	for _, dep := range deps {
+		if dep.Name == "real-crate" && dep.VersionSpec != "^2.1" {
+			t.Fatalf("unexpected renamed dependency spec: %q", dep.VersionSpec)
+		}
+		if dep.Ecosystem != ecosystemRust {
+			t.Fatalf("unexpected ecosystem for %s: %q", dep.Name, dep.Ecosystem)
+		}
+	}
+}
+
+func TestParseCargoLock(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Cargo.lock")
+	data := `
+version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+dependencies = ["serde"]
+
+[[package]]
+name = "serde"
+version = "1.0.210"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8e3592472072e6e22e0a54d5904d9febf8508f65fb8552499a1abc7d1078c3a"
+
+[[package]]
+name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "syn"
+version = "2.0.77"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "from-git"
+version = "0.3.0"
+source = "git+https://example.com/from-git.git#abc123"
+`
+
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write Cargo.lock: %v", err)
+	}
+
+	deps, err := parseCargoLock(path)
+	if err != nil {
+		t.Fatalf("parse Cargo.lock: %v", err)
+	}
+
+	got := dependencyNameVersions(deps)
+	want := []string{"from-git@0.3.0", "serde@1.0.210", "syn@1.0.109", "syn@2.0.77"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
 func dependencyNames(deps []dependencyRef) []string {
 	names := make([]string, 0, len(deps))
 	for _, dep := range deps {
