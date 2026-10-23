@@ -459,6 +459,64 @@ only-excluded = { workspace = true }
 	}
 }
 
+func TestParseCargoTomlFollowsImplicitPathMembers(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := map[string]string{
+		"Cargo.toml": `
+[package]
+name = "root"
+
+[dependencies]
+helper = { path = "helper" }
+vendored = { path = "vendored" }
+
+[workspace]
+exclude = ["vendored"]
+
+[workspace.dependencies]
+from-path-member = "1"
+from-nested-member = "2"
+from-excluded = "3"
+unused = "4"
+`,
+		"helper/Cargo.toml": `
+[dependencies]
+from-path-member = { workspace = true }
+nested = { path = "../nested" }
+`,
+		"nested/Cargo.toml": `
+[dev-dependencies]
+from-nested-member = { workspace = true }
+`,
+		"vendored/Cargo.toml": `
+[dependencies]
+from-excluded = { workspace = true }
+`,
+	}
+	for name, data := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatalf("create %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	deps, err := parseCargoToml(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatalf("parse Cargo.toml: %v", err)
+	}
+
+	got := dependencyNames(deps)
+	want := []string{"from-nested-member", "from-path-member"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected deps: got %v want %v", got, want)
+	}
+}
+
 func TestParseCargoLock(t *testing.T) {
 	t.Parallel()
 

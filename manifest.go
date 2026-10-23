@@ -504,22 +504,13 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 			deps = append(deps, dep)
 		}
 	}
-	addTables := func(tables cargoDependencyTables) {
-		addTable(tables.Dependencies)
-		addTable(tables.DevDependencies)
-		addTable(tables.LegacyDevDependencies)
-		addTable(tables.BuildDependencies)
-		addTable(tables.LegacyBuildDependencies)
-	}
-
-	addTables(manifest.cargoDependencyTables)
-	for _, target := range manifest.Target {
-		addTables(target)
+	for _, table := range manifest.dependencyTables() {
+		addTable(table)
 	}
 
 	// [workspace.dependencies] only declares crates for members to opt into, so
 	// report an entry only when a workspace member inherits it.
-	memberInherited, err := cargoMemberInheritedDependencies(filepath.Dir(path), manifest.Workspace.Members, manifest.Workspace.Exclude)
+	memberInherited, err := cargoMemberInheritedDependencies(filepath.Dir(path), manifest)
 	if err != nil {
 		return nil, err
 	}
@@ -540,15 +531,19 @@ func parseCargoToml(path string) ([]dependencyRef, error) {
 }
 
 // cargoMemberInheritedDependencies returns the dependency keys that workspace
-// member manifests inherit with workspace = true.
-func cargoMemberInheritedDependencies(rootDir string, members, exclude []string) (map[string]struct{}, error) {
+// members inherit with workspace = true. Members are the crates listed in
+// [workspace] members plus, as in Cargo, every path dependency reachable from
+// the root or another member that lives inside the workspace directory.
+func cargoMemberInheritedDependencies(rootDir string, root cargoManifest) (map[string]struct{}, error) {
+	rootDir = filepath.Clean(rootDir)
 	inherited := map[string]struct{}{}
-	excluded := make([]string, 0, len(exclude))
-	for _, pattern := range exclude {
+	excluded := make([]string, 0, len(root.Workspace.Exclude))
+	for _, pattern := range root.Workspace.Exclude {
 		excluded = append(excluded, filepath.Clean(filepath.FromSlash(pattern)))
 	}
 
-	for _, member := range members {
+	queue := cargoPathDependencyDirs(rootDir, root)
+	for _, member := range root.Workspace.Members {
 		memberPattern := filepath.FromSlash(strings.TrimSpace(member))
 		if memberPattern == "" || filepath.IsAbs(memberPattern) {
 			continue
@@ -558,26 +553,70 @@ func cargoMemberInheritedDependencies(rootDir string, members, exclude []string)
 			return nil, fmt.Errorf("expand workspace member %q: %w", member, err)
 		}
 		for _, memberPath := range matches {
-			relDir, err := filepath.Rel(rootDir, filepath.Dir(memberPath))
-			if err != nil || cargoMemberExcluded(relDir, excluded) {
-				continue
-			}
-			data, err := readManifestFile(memberPath)
-			if err != nil {
-				return nil, err
-			}
-			var memberManifest cargoManifest
-			if err := toml.Unmarshal(data, &memberManifest); err != nil {
-				return nil, fmt.Errorf("parse %s: %w", memberPath, err)
-			}
-			collectCargoInheritedDependencies(inherited, memberManifest.cargoDependencyTables)
-			for _, target := range memberManifest.Target {
-				collectCargoInheritedDependencies(inherited, target)
-			}
+			queue = append(queue, filepath.Dir(memberPath))
 		}
 	}
 
+	visited := map[string]struct{}{rootDir: {}}
+	for len(queue) > 0 {
+		memberDir := filepath.Clean(queue[0])
+		queue = queue[1:]
+		if _, ok := visited[memberDir]; ok {
+			continue
+		}
+		visited[memberDir] = struct{}{}
+
+		relDir, err := filepath.Rel(rootDir, memberDir)
+		if err != nil || relDir == ".." || strings.HasPrefix(relDir, ".."+string(filepath.Separator)) || cargoMemberExcluded(relDir, excluded) {
+			continue
+		}
+
+		memberPath := filepath.Join(memberDir, "Cargo.toml")
+		data, err := readManifestFile(memberPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		var memberManifest cargoManifest
+		if err := toml.Unmarshal(data, &memberManifest); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", memberPath, err)
+		}
+		for _, table := range memberManifest.dependencyTables() {
+			for key, spec := range table {
+				if cargoInheritsWorkspace(spec) {
+					inherited[key] = struct{}{}
+				}
+			}
+		}
+		queue = append(queue, cargoPathDependencyDirs(memberDir, memberManifest)...)
+	}
+
 	return inherited, nil
+}
+
+// cargoPathDependencyDirs returns the directories of a manifest's path dependencies.
+func cargoPathDependencyDirs(manifestDir string, manifest cargoManifest) []string {
+	dirs := make([]string, 0)
+	for _, table := range manifest.dependencyTables() {
+		for _, spec := range table {
+			fields, ok := spec.(map[string]any)
+			if !ok {
+				continue
+			}
+			depPath, ok := fields["path"].(string)
+			if !ok || strings.TrimSpace(depPath) == "" {
+				continue
+			}
+			depPath = filepath.FromSlash(strings.TrimSpace(depPath))
+			if !filepath.IsAbs(depPath) {
+				depPath = filepath.Join(manifestDir, depPath)
+			}
+			dirs = append(dirs, depPath)
+		}
+	}
+	return dirs
 }
 
 func cargoMemberExcluded(relDir string, excluded []string) bool {
@@ -589,19 +628,21 @@ func cargoMemberExcluded(relDir string, excluded []string) bool {
 	return false
 }
 
-func collectCargoInheritedDependencies(inherited map[string]struct{}, tables cargoDependencyTables) {
-	for _, table := range []map[string]any{
-		tables.Dependencies,
-		tables.DevDependencies,
-		tables.LegacyDevDependencies,
-		tables.BuildDependencies,
-		tables.LegacyBuildDependencies,
-	} {
-		for key, spec := range table {
-			if cargoInheritsWorkspace(spec) {
-				inherited[key] = struct{}{}
-			}
-		}
+func (m cargoManifest) dependencyTables() []map[string]any {
+	tables := m.list()
+	for _, target := range m.Target {
+		tables = append(tables, target.list()...)
+	}
+	return tables
+}
+
+func (t cargoDependencyTables) list() []map[string]any {
+	return []map[string]any{
+		t.Dependencies,
+		t.DevDependencies,
+		t.LegacyDevDependencies,
+		t.BuildDependencies,
+		t.LegacyBuildDependencies,
 	}
 }
 
